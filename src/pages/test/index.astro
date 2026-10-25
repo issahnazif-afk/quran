@@ -188,6 +188,15 @@ const meta = getMeta();
         <p class="hint-text">Standard: after 5 ayahs or about half a page, whichever comes first, always at the end of an ayah.</p>
       </div>
 
+      <div class="group">
+        <span class="group-title">What should the Sheikh recite to start each question?</span>
+        <div class="radio">
+          <label><input type="radio" name="t-open" value="standard" checked /> Standard: the opening words of the ayah</label>
+          <label><input type="radio" name="t-open" value="whole" /> The whole ayah</label>
+        </div>
+        <p class="hint-text">Standard: the first third of the ayah, between 1 and 6 words, as an examiner does in a hifz test. Very short ayahs are recited in full.</p>
+      </div>
+
       <div class="fields">
         <div class="control">
           <label class="field-label" for="t-reciter">Sheikh’s voice</label>
@@ -457,6 +466,19 @@ const meta = getMeta();
       });
     }
 
+    // How much of the ayah the Sheikh recites: its opening words, like an examiner.
+    function openingWords(it) {
+      const n = it.words.length;
+      if (radio('t-open') === 'whole' || n <= 2) return n;
+      return Math.min(6, n - 1, Math.max(1, Math.ceil(n / 3)));
+    }
+    // Rough share of the recitation those words take, by letters (long vowels take longer).
+    function openingShare(it, k) {
+      const len = (w) => w.plain.length + 1;
+      const part = it.words.slice(0, k).reduce((t, w) => t + len(w), 0);
+      return part / it.words.reduce((t, w) => t + len(w), 0);
+    }
+
     // The Sheikh recites the starting ayah only, then it is the reader's turn.
     const voice = new Audio();
     async function sheikhRecites(again) {
@@ -468,24 +490,57 @@ const meta = getMeta();
         status('The Sheikh is about to recite an ayah. Listen, then start from that same ayah.');
         await speakAr('اقرأ من قوله تعالى');
       }
-      sheikh('speaking', 'اقرأ من قوله تعالى…', 'Listen to the ayah.');
-      const ok = await playAudio(audioUrl(settings.reciter, first.s, first.a));
+      const k = openingWords(first);
+      sheikh('speaking', 'اقرأ من قوله تعالى…', k < first.words.length ? 'Listen to the opening of the ayah.' : 'Listen to the ayah.');
+      const ok = await playAudio(audioUrl(settings.reciter, first.s, first.a), k < first.words.length ? openingShare(first, k) : 1);
       if (phase === 'done') return;
-      if (!ok) status('The recitation could not be played. Check your connection, or try another voice.', 'bad');
-      sheikh('listening', 'تفضّل، اقرأ', 'Go ahead. Recite from that same ayah and carry on.');
-      status('Your turn. Start from the ayah you just heard.');
+      if (!ok) {
+        // if the audio fails, the Sheikh shows the opening words instead
+        sheikh('listening', first.words.slice(0, k).map((w) => w.display).join(' ') + ' …', 'The recitation could not be played, so here are the opening words.');
+        status('The recitation could not be played. Check your connection, or try another voice.', 'bad');
+      }
+      if (ok) sheikh('listening', 'تفضّل، اقرأ', 'Go ahead. Recite that ayah from its start and carry on.');
+      if (ok) status('Your turn. Start from the beginning of the ayah you just heard.');
       phase = 'answer';
       updateCurrent();
       startListening();
       armSilence();
     }
-    function playAudio(src) {
+    // Play a recitation. With share < 1, stop softly after that part of it (the opening words).
+    const LEAD = 0.3, TAIL = 0.3;   // typical silence at the start and end of each ayah file, in seconds
+    function playAudio(src, share = 1) {
       return new Promise((resolve) => {
+        let stopAt = null, fading = false, finished = false;
+        const timer = setInterval(() => {
+          if (share >= 1 || stopAt === null || fading) return;
+          if (voice.currentTime >= stopAt) {
+            fading = true;
+            let v = 1;
+            const fade = setInterval(() => {
+              v -= 0.12;
+              try { voice.volume = Math.max(0, v); } catch {}
+              if (v <= 0) { clearInterval(fade); end(true); }
+            }, 35);
+          }
+        }, 40);
+        function end(ok) {
+          if (finished) return;
+          finished = true;
+          clearInterval(timer);
+          voice.pause();
+          try { voice.volume = 1; } catch {}
+          resolve(ok);
+        }
         voice.loop = false;
-        voice.onended = () => resolve(true);
-        voice.onerror = () => resolve(false);
+        voice.onloadedmetadata = () => {
+          const d = voice.duration;
+          if (Number.isFinite(d) && d > 0) stopAt = Math.min(d, LEAD + Math.max(0, d - LEAD - TAIL) * share + 0.25);
+        };
+        voice.onended = () => end(true);
+        voice.onerror = () => end(false);
+        try { voice.volume = 1; } catch {}
         voice.src = src;
-        voice.play().catch(() => resolve(false));
+        voice.play().catch(() => end(false));
       });
     }
 
