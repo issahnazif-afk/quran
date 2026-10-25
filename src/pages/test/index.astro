@@ -56,7 +56,8 @@ const meta = getMeta();
     .practice .paper.outlines .w.hidden { box-shadow: inset 0 -1px 0 var(--paper-line); }
     .practice .w.current { box-shadow: inset 0 -2px 0 var(--accent) !important; }
     .practice .w.current.wrong { box-shadow: inset 0 -3px 0 var(--bad) !important; background: rgba(179, 38, 30, .12); }
-    .practice .w.weak { color: var(--bad); }
+    .practice .w.weak { color: var(--bad); box-shadow: inset 0 -2px 0 rgba(179, 38, 30, .35); }
+    .practice .w.missed { box-shadow: inset 0 -3px 0 var(--bad) !important; background: rgba(179, 38, 30, .12); }
     .practice .w.helped { color: var(--marker); }
     .practice .w.fresh { color: var(--good); transition: none; }
     .practice .w.replay { background: linear-gradient(transparent 24%, var(--replay) 24%, var(--replay) 84%, transparent 84%); }
@@ -202,6 +203,10 @@ const meta = getMeta();
         </div>
         <button class="btn btn-primary" type="submit">Start test</button>
       </div>
+      <div class="radio">
+        <label><input type="checkbox" id="t-speak" checked style="width:18px;height:18px" /> The Sheikh speaks his instructions aloud, such as «اقرأ» and «حسبك»</label>
+      </div>
+      <p class="hint-text">The Quran itself is always recited by the voice you chose. Short instructions use your device’s Arabic voice, if it has one; otherwise they are shown only in the speech bubble.</p>
       <p class="hint-text" id="t-err" role="alert" style="color:#B3261E"></p>
     </form>
 
@@ -349,17 +354,21 @@ const meta = getMeta();
       let n = radio('t-qmode') === 'custom'
         ? Math.min(20, Math.max(1, parseInt($('t-qn').value, 10) || 1))
         : Math.min(10, Math.max(1, Math.round(pages / 2)));
-      n = Math.min(n, scopeAyahs.length);
+      // Questions never overlap: each answer stays inside its own slice of the range,
+      // so the Sheikh never ends up walking you through the whole surah.
+      const span = radio('t-smode') === 'custom' ? Math.max(1, parseInt($('t-sn').value, 10) || 1) : 5;
+      n = Math.max(1, Math.min(n, Math.floor(scopeAyahs.length / span) || 1));
 
       // spread questions across the range: one random ayah from each equal slice, then shuffle
       const starts = [];
       for (let k = 0; k < n; k++) {
         const lo = Math.floor((k * scopeAyahs.length) / n);
         const hi = Math.max(lo, Math.floor(((k + 1) * scopeAyahs.length) / n) - 1);
-        starts.push(lo + Math.floor(Math.random() * (hi - lo + 1)));
+        const last = Math.max(lo, hi - span + 1);
+        starts.push(lo + Math.floor(Math.random() * (last - lo + 1)));
       }
-      for (let k = starts.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [starts[k], starts[j]] = [starts[j], starts[k]]; }
-      questions = starts.map((start) => ({ start }));
+      questions = starts.map((start, k) => ({ start, end: Math.max(start, Math.floor(((k + 1) * scopeAyahs.length) / n) - 1) }));
+      for (let k = questions.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [questions[k], questions[j]] = [questions[j], questions[k]]; }
       qi = -1;
 
       $('setup').hidden = true; $('intro').hidden = true; $('results').hidden = true;
@@ -378,13 +387,13 @@ const meta = getMeta();
       it.words.forEach((w, i) => Object.assign(w, { item: it, wi: i, state: 'hidden', page: it.page, mistake: false }));
       return it;
     }
-    function buildQuestion(start) {
+    function buildQuestion(qn) {
       const custom = radio('t-smode') === 'custom' ? Math.max(1, parseInt($('t-sn').value, 10) || 1) : null;
       const out = [];
       let ayahs = 0, words = 0;
-      for (let k = start; k < scopeAyahs.length; k++) {
+      for (let k = qn.start; k < scopeAyahs.length && k <= qn.end; k++) {
         const { s, sura, ay } = scopeAyahs[k];
-        if (k > start && ay.a === 1 && sura.bismillah && s !== 1) out.push(makeItem(s, sura, ay, true));
+        if (k > qn.start && ay.a === 1 && sura.bismillah && s !== 1) out.push(makeItem(s, sura, ay, true));
         const it = makeItem(s, sura, ay, false);
         out.push(it);
         ayahs++; words += it.words.length;
@@ -416,7 +425,7 @@ const meta = getMeta();
       qi++;
       if (qi >= questions.length) return finishTest();
       q = questions[qi];
-      q.items = buildQuestion(q.start);
+      q.items = buildQuestion(q);
       q.stats = { words: 0, first: 0, prompts: 0, help: 0, skipped: false };
       items = q.items; flat = items.flatMap((it) => it.words);
       q.flat = flat;
@@ -429,17 +438,41 @@ const meta = getMeta();
       await sheikhRecites();
     }
 
-    // The Sheikh recites the whole starting ayah, then it is the reader's turn.
+    // Short spoken instructions (never the Quran itself) use the device's Arabic voice, if any.
+    let arVoice = null;
+    function pickVoice() { arVoice = (window.speechSynthesis?.getVoices() ?? []).find((v) => /^ar([-_]|$)/i.test(v.lang)) ?? null; }
+    if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.addEventListener?.('voiceschanged', pickVoice); }
+    function speakAr(text) {
+      return new Promise((resolve) => {
+        if (!arVoice || !$('t-speak').checked) return resolve(false);
+        const ut = new SpeechSynthesisUtterance(text);
+        ut.voice = arVoice; ut.lang = arVoice.lang; ut.rate = 0.9;
+        let done = false;
+        const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
+        ut.onend = () => finish(true);
+        ut.onerror = () => finish(false);
+        speechSynthesis.cancel();
+        speechSynthesis.speak(ut);
+        setTimeout(() => finish(true), 4000);
+      });
+    }
+
+    // The Sheikh recites the starting ayah only, then it is the reader's turn.
     const voice = new Audio();
-    async function sheikhRecites() {
+    async function sheikhRecites(again) {
       phase = 'sheikh';
       stopListening();
       const first = items[0];
-      sheikh('speaking', 'استمع…', 'Listen to the ayah.');
-      status('The Sheikh is reciting. Listen, then start from this same ayah.');
+      if (!again) {
+        sheikh('speaking', 'اقرأ من قوله تعالى', 'Recite from where Allah says:');
+        status('The Sheikh is about to recite an ayah. Listen, then start from that same ayah.');
+        await speakAr('اقرأ من قوله تعالى');
+      }
+      sheikh('speaking', 'اقرأ من قوله تعالى…', 'Listen to the ayah.');
       const ok = await playAudio(audioUrl(settings.reciter, first.s, first.a));
+      if (phase === 'done') return;
       if (!ok) status('The recitation could not be played. Check your connection, or try another voice.', 'bad');
-      sheikh('listening', 'اقرأ من هذه الآية وتابع', 'Your turn. Recite from that same ayah and carry on.');
+      sheikh('listening', 'تفضّل، اقرأ', 'Go ahead. Recite from that same ayah and carry on.');
       status('Your turn. Start from the ayah you just heard.');
       phase = 'answer';
       updateCurrent();
@@ -448,6 +481,7 @@ const meta = getMeta();
     }
     function playAudio(src) {
       return new Promise((resolve) => {
+        voice.loop = false;
         voice.onended = () => resolve(true);
         voice.onerror = () => resolve(false);
         voice.src = src;
@@ -458,7 +492,7 @@ const meta = getMeta();
     $('repeat').addEventListener('click', async () => {
       if (phase !== 'answer') return;
       clearSilence();
-      await sheikhRecites();
+      await sheikhRecites(true);
     });
     $('skip').addEventListener('click', () => {
       if (!q || phase === 'done') return;
@@ -498,6 +532,7 @@ const meta = getMeta();
         const cls = w.state === 'shown' ? 'w' : w.state === 'skipped' ? 'w out' : 'w hidden';
         const sp = el('span', cls, w.display);
         if (w.state === 'shown') { if (w.helped) sp.classList.add('helped'); else if (w.mistake) sp.classList.add('weak'); }
+        else if (w.mistake) sp.classList.add('missed');
         w.el = sp;
         return sp;
       };
@@ -529,8 +564,7 @@ const meta = getMeta();
         }
       }
       paper.append(el('div', 'folio', arNum(p)));
-      if (animate && !reduceMotion) paper.classList.add('turn-in');
-      $('stage').replaceChildren(paper);
+      await swapPaper(paper, animate);
       shownPage = p;
     }
 
@@ -548,25 +582,25 @@ const meta = getMeta();
     function timing(w) {
       const letters = Math.max(1, w.plain.length);
       const backlog = queue.length;
-      return {
-        dur: backlog > 2 ? 160 : Math.min(340, Math.max(180, letters * 32)),
-        gap: backlog > 2 ? 30 : Math.min(140, Math.max(60, letters * 16)),
-      };
+      // quick enough to keep pace with normal recitation, quicker still when speech runs ahead
+      const dur = backlog > 2 ? 110 : Math.min(240, Math.max(130, letters * 22));
+      const gap = backlog > 2 ? 12 : Math.min(60, Math.max(25, letters * 8));
+      return { dur, gap };
     }
     function revealStep(w) {
       return async () => {
         if (w.page !== shownPage) {
-          await wait(Math.max(0, lastInkEnd - Date.now()) + (reduceMotion ? 150 : 350));
+          await wait(Math.max(0, lastInkEnd - Date.now()) + (reduceMotion ? 0 : 150));
           await renderPage(w.page, true);
-          await wait(reduceMotion ? 0 : 200);
         }
         const sp = w.el;
         if (!sp) return;
         const { dur, gap } = reduceMotion ? { dur: 1, gap: 0 } : timing(w);
-        sp.classList.remove('hidden', 'hint', 'current', 'wrong');
-        sp.classList.add(w.helped ? 'helped' : 'fresh');
+        sp.classList.remove('hidden', 'hint', 'current', 'wrong', 'missed');
+        sp.classList.add(w.helped ? 'helped' : w.mistake ? 'weak' : 'fresh');
         sp.style.setProperty('--dur', `${dur}ms`);
         sp.classList.add('ink');
+        follow(sp);
         w.state = 'shown';
         lastInkEnd = Date.now() + dur;
         setTimeout(() => { sp.classList.remove('ink'); sp.style.removeProperty('--dur'); }, dur + 20);
@@ -579,11 +613,57 @@ const meta = getMeta();
         await wait(gap);
       };
     }
+    // Smoothly change pages: the finished page slides away and the next one slides in from the left.
+    async function swapPaper(paper, animate) {
+      const stage = $('stage');
+      const old = stage.querySelector('.paper');
+      if (!animate || !old || reduceMotion) { stage.replaceChildren(paper); return; }
+      const box = old.getBoundingClientRect();
+      stage.style.position = 'relative';
+      stage.style.minHeight = old.offsetHeight + 'px';
+      Object.assign(old.style, { position: 'absolute', top: '0', left: '50%', width: box.width + 'px', margin: '0' });
+      stage.append(paper);
+      const opts = { duration: 420, easing: 'cubic-bezier(.2,.7,.2,1)', fill: 'forwards' };
+      old.animate([{ opacity: 1, transform: 'translateX(-50%)' }, { opacity: 0, transform: 'translateX(calc(-50% + 70px))' }], opts);
+      await paper.animate([{ opacity: 0, transform: 'translateX(-70px)' }, { opacity: 1, transform: 'none' }], opts).finished.catch(() => {});
+      old.remove();
+      stage.style.minHeight = '';
+      const bar = document.querySelector('.practice .toolbar');
+      const barBottom = bar ? bar.getBoundingClientRect().bottom : 80;
+      const top = paper.getBoundingClientRect().top;
+      if (top < barBottom || top > innerHeight * 0.45) window.scrollBy({ top: top - barBottom - 12, behavior: 'smooth' });
+    }
+
+    // Keep the line being recited in view.
+    let lastFollow = 0;
+    function follow(node) {
+      if (!node) return;
+      const now = Date.now();
+      if (now - lastFollow < 250) return;
+      const r = node.getBoundingClientRect();
+      const bar = document.querySelector('.practice .toolbar');
+      const topLimit = (bar ? bar.getBoundingClientRect().bottom : 80) + 24;
+      const bottomLimit = innerHeight - 120;
+      if (r.top < topLimit || r.bottom > bottomLimit) {
+        lastFollow = now;
+        window.scrollBy({ top: r.top - (topLimit + (bottomLimit - topLimit) * 0.35), behavior: reduceMotion ? 'auto' : 'smooth' });
+      }
+    }
+
+    // Did another of the speech engine's guesses hear the right word?
+    function altHeard(res, i, th) {
+      for (let k = 1; k < res.length; k++) {
+        const alt = normalize(res[k].transcript).split(' ').filter(Boolean);
+        for (const j of [i, i - 1, i + 1]) if (alt[j] && matchAt(alt, j, flat, pos, th).n) return true;
+      }
+      return false;
+    }
+
     function updateCurrent() {
       document.querySelectorAll('.hifz .w.current').forEach((x) => x.classList.remove('current'));
       const w = flat[pos];
       if (!w || phase !== 'answer') return;
-      if (w.page === shownPage) w.el?.classList.add('current');
+      if (w.page === shownPage) { w.el?.classList.add('current'); follow(w.el); }
       $('where').textContent = `${w.item.label}, word ${w.wi + 1} of ${w.item.words.length}`;
     }
 
@@ -601,6 +681,7 @@ const meta = getMeta();
       }
       wrongStreak = 0;
       if (kind !== 'prompt') status(kind === 'help' ? 'Shown. Carry on.' : 'Correct. Keep going.', 'good');
+      if (!kind && phase === 'answer' && $('sheikh').dataset.state === 'listening') sheikh('listening', 'تفضّل', 'Carry on.');
       updateCurrent();
       armSilence();
     }
@@ -609,8 +690,10 @@ const meta = getMeta();
       if (!w) return;
       w.mistake = true;
       wrongStreak++;
-      if (w.el) { w.el.classList.add('current', 'wrong'); setTimeout(() => w.el?.classList.remove('wrong'), 800); }
+      if (w.el) { w.el.classList.add('current', 'wrong', 'missed'); setTimeout(() => w.el?.classList.remove('wrong'), 800); }
       status(`Heard “${heard}”. That is not the next word.`, 'bad');
+      if (wrongStreak === 1) sheikh('listening', 'انتبه', 'Take care, that is not right.');
+      else if (wrongStreak === 2) sheikh('listening', 'أعد', 'Try that word again.');
       if (wrongStreak >= 3) sheikhPrompts();
     }
 
@@ -645,18 +728,28 @@ const meta = getMeta();
       phase = 'stopped';
       clearSilence();
       stopListening();
-      sheikh('stop', 'قف. جزاك الله خيرا', 'Stop there. May Allah reward you.');
+      const st = q.stats;
+      const ratio = st.words ? st.first / st.words : 0;
+      let ar, en;
+      if (ratio === 1 && st.prompts === 0 && st.help === 0) { ar = 'حسبك، أحسنت، بارك الله فيك'; en = 'That is enough. Excellent, may Allah bless you.'; }
+      else if (ratio >= 0.85) { ar = 'حسبك، بارك الله فيك'; en = 'That is enough. May Allah bless you.'; }
+      else { ar = 'حسبك. راجع هذا الموضع'; en = 'That is enough. Revise this passage.'; }
+      sheikh('stop', ar, en);
       status('Question complete.', 'good');
       ['repeat', 'help', 'skip'].forEach((id) => ($(id).disabled = true));
       chime();
+      await speakAr(ar);
       if (qi + 1 < questions.length) {
         $('next').hidden = false;
-        $('next').textContent = 'Next question';
-        await wait(3500);
+        await wait(2500);
         if (phase === 'stopped' && questions[qi] === q) nextQuestion();
       } else {
-        await wait(2500);
-        if (phase === 'stopped') finishTest();
+        await wait(1500);
+        if (phase === 'stopped') {
+          sheikh('stop', 'انتهى الاختبار، جزاك الله خيرا', 'The test is over. May Allah reward you.');
+          await speakAr('انتهى الاختبار، جزاك الله خيرا');
+          if (phase === 'stopped') finishTest();
+        }
       }
     }
     function chime() {
@@ -684,7 +777,7 @@ const meta = getMeta();
     }
     function finishTest() {
       phase = 'done';
-      clearSilence(); stopListening(); voice.pause();
+      clearSilence(); stopListening(); voice.pause(); try { speechSynthesis.cancel(); } catch {}
       if (q && !q.stats) q.stats = { words: 0, first: 0, prompts: 0, help: 0, skipped: true };
       if (q?.stats && q.flat && pos < q.flat.length && !q.stats.skipped) q.stats.ended = true;
       $('exam').hidden = true;
@@ -726,14 +819,17 @@ const meta = getMeta();
     function markReplay(idx) { const w = flat[idx]; if (w?.el && w.page === shownPage) w.el.classList.add('replay'); }
     function endReplay() { back = null; setTimeout(() => document.querySelectorAll('.hifz .w.replay').forEach((x) => x.classList.remove('replay')), 900); }
     function findBacktrack(spoken, i, th) {
-      let best = null;
-      for (let k = 1; k <= 3 && pos - k >= 0; k++) {
+      // A reciter may step back a few words, or to the start of the ayah, as in normal recitation.
+      let near = null;
+      for (let k = 1; k <= 12 && pos - k >= 0; k++) {
         const idx = pos - k;
+        if (flat[idx].state === 'skipped') break;
         if (!matchAt(spoken, i, flat, idx, th).n) continue;
-        if (spoken[i + 1] && idx + 1 < pos && matchAt(spoken, i + 1, flat, idx + 1, th).n) return idx;
-        best ??= idx;
+        const follows = spoken[i + 1] && idx + 1 < pos && matchAt(spoken, i + 1, flat, idx + 1, th).n;
+        if (follows) return idx;
+        if (k <= 3) near ??= idx;   // a single matching word is only trusted for a short step back
       }
-      return best;
+      return near;
     }
     function processResults(results, from) {
       if (phase !== 'answer') return;
@@ -774,6 +870,7 @@ const meta = getMeta();
             if (back >= pos) endReplay();
             continue;
           }
+          if (altHeard(res, i, th)) { if (back !== null) endReplay(); i++; used[r] = i; accept(1); continue; }
           if (spoken[i + 1] && matchAt(spoken, i + 1, flat, pos, th).n) { i++; used[r] = i; continue; }
           if (!res.isFinal) break;
           i++; used[r] = i;
@@ -787,7 +884,7 @@ const meta = getMeta();
       rec.lang = 'ar-SA';
       rec.continuous = true;
       rec.interimResults = true;
-      rec.maxAlternatives = 1;
+      rec.maxAlternatives = 3;
       used = {};
       const me = rec;
       rec.onresult = (e) => { if (me === rec) processResults(e.results, e.resultIndex); };

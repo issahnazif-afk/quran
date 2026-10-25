@@ -54,7 +54,8 @@ const meta = getMeta();
     .practice .paper.outlines .w.hidden { box-shadow: inset 0 -1px 0 var(--paper-line); }
     .practice .w.current { box-shadow: inset 0 -2px 0 var(--accent) !important; }
     .practice .w.current.wrong { box-shadow: inset 0 -3px 0 var(--bad) !important; background: rgba(179, 38, 30, .12); }
-    .practice .w.weak { color: var(--bad); }
+    .practice .w.weak { color: var(--bad); box-shadow: inset 0 -2px 0 rgba(179, 38, 30, .35); }
+    .practice .w.missed { box-shadow: inset 0 -3px 0 var(--bad) !important; background: rgba(179, 38, 30, .12); }
     .practice .w.helped { color: var(--marker); }
     .practice .w.fresh { color: var(--good); transition: none; }
     .practice .w.replay { background: linear-gradient(transparent 24%, var(--replay) 24%, var(--replay) 84%, transparent 84%); }
@@ -426,6 +427,7 @@ const meta = getMeta();
         const cls = w.state === 'shown' ? 'w' : w.state === 'skipped' ? 'w out' : 'w hidden';
         const sp = el('span', cls, w.display);
         if (w.state === 'shown') { if (w.helped) sp.classList.add('helped'); else if (w.mistake) sp.classList.add('weak'); }
+        else if (w.mistake) sp.classList.add('missed');
         if (w.hint && w.state === 'hidden') sp.classList.add('hint');
         w.el = sp;
         return sp;
@@ -458,8 +460,7 @@ const meta = getMeta();
         }
       }
       paper.append(el('div', 'folio', arNum(p)));
-      if (animate && !reduceMotion) paper.classList.add('turn-in');
-      $('stage').replaceChildren(paper);
+      await swapPaper(paper, animate);
       shownPage = p;
     }
 
@@ -481,8 +482,9 @@ const meta = getMeta();
     function timing(w) {
       const letters = Math.max(1, w.plain.length);
       const backlog = queue.length;
-      const dur = backlog > 2 ? 160 : Math.min(340, Math.max(180, letters * 32));
-      const gap = backlog > 2 ? 30 : Math.min(140, Math.max(60, letters * 16));
+      // quick enough to keep pace with normal recitation, quicker still when speech runs ahead
+      const dur = backlog > 2 ? 110 : Math.min(240, Math.max(130, letters * 22));
+      const gap = backlog > 2 ? 12 : Math.min(60, Math.max(25, letters * 8));
       return { dur, gap };
     }
     function settle(sp, w) {
@@ -493,17 +495,17 @@ const meta = getMeta();
     function revealStep(w) {
       return async () => {
         if (w.page !== shownPage) {
-          if (shownPage) await wait(Math.max(0, lastInkEnd - Date.now()) + (reduceMotion ? 150 : 350));
+          await wait(Math.max(0, lastInkEnd - Date.now()) + (reduceMotion ? 0 : 150));
           await renderPage(w.page, true);
-          await wait(reduceMotion ? 0 : 200);
         }
         const sp = w.el;
         if (!sp) return;
         const { dur, gap } = reduceMotion ? { dur: 1, gap: 0 } : timing(w);
-        sp.classList.remove('hidden', 'hint', 'current', 'wrong');
-        if (!w.helped) sp.classList.add('fresh'); else sp.classList.add('helped');
+        sp.classList.remove('hidden', 'hint', 'current', 'wrong', 'missed');
+        sp.classList.add(w.helped ? 'helped' : w.mistake ? 'weak' : 'fresh');
         sp.style.setProperty('--dur', `${dur}ms`);
         sp.classList.add('ink');
+        follow(sp);
         w.state = 'shown';
         lastInkEnd = Date.now() + dur;
         setTimeout(() => { sp.classList.remove('ink'); sp.style.removeProperty('--dur'); }, dur + 20);
@@ -531,12 +533,58 @@ const meta = getMeta();
       };
     }
 
+    // Smoothly change pages: the finished page slides away and the next one slides in from the left.
+    async function swapPaper(paper, animate) {
+      const stage = $('stage');
+      const old = stage.querySelector('.paper');
+      if (!animate || !old || reduceMotion) { stage.replaceChildren(paper); return; }
+      const box = old.getBoundingClientRect();
+      stage.style.position = 'relative';
+      stage.style.minHeight = old.offsetHeight + 'px';
+      Object.assign(old.style, { position: 'absolute', top: '0', left: '50%', width: box.width + 'px', margin: '0' });
+      stage.append(paper);
+      const opts = { duration: 420, easing: 'cubic-bezier(.2,.7,.2,1)', fill: 'forwards' };
+      old.animate([{ opacity: 1, transform: 'translateX(-50%)' }, { opacity: 0, transform: 'translateX(calc(-50% + 70px))' }], opts);
+      await paper.animate([{ opacity: 0, transform: 'translateX(-70px)' }, { opacity: 1, transform: 'none' }], opts).finished.catch(() => {});
+      old.remove();
+      stage.style.minHeight = '';
+      const bar = document.querySelector('.practice .toolbar');
+      const barBottom = bar ? bar.getBoundingClientRect().bottom : 80;
+      const top = paper.getBoundingClientRect().top;
+      if (top < barBottom || top > innerHeight * 0.45) window.scrollBy({ top: top - barBottom - 12, behavior: 'smooth' });
+    }
+
+    // Keep the line being recited in view.
+    let lastFollow = 0;
+    function follow(node) {
+      if (!node) return;
+      const now = Date.now();
+      if (now - lastFollow < 250) return;
+      const r = node.getBoundingClientRect();
+      const bar = document.querySelector('.practice .toolbar');
+      const topLimit = (bar ? bar.getBoundingClientRect().bottom : 80) + 24;
+      const bottomLimit = innerHeight - 120;
+      if (r.top < topLimit || r.bottom > bottomLimit) {
+        lastFollow = now;
+        window.scrollBy({ top: r.top - (topLimit + (bottomLimit - topLimit) * 0.35), behavior: reduceMotion ? 'auto' : 'smooth' });
+      }
+    }
+
+    // Did another of the speech engine's guesses hear the right word?
+    function altHeard(res, i, th) {
+      for (let k = 1; k < res.length; k++) {
+        const alt = normalize(res[k].transcript).split(' ').filter(Boolean);
+        for (const j of [i, i - 1, i + 1]) if (alt[j] && matchAt(alt, j, flat, pos, th).n) return true;
+      }
+      return false;
+    }
+
     function updateCurrent() {
       document.querySelectorAll('.practice .w.current').forEach((x) => x.classList.remove('current'));
       $('bar').style.width = mode === 'surah' && flat.length ? `${(pos / flat.length) * 100}%` : '0';
       const w = flat[pos];
       if (!w || phase !== 'tracking') return;
-      if (w.page === shownPage) w.el?.classList.add('current');
+      if (w.page === shownPage) { w.el?.classList.add('current'); follow(w.el); }
       const it = w.item;
       $('where').textContent = `${it.label}, word ${w.wi + 1} of ${it.words.length}, page ${w.page}`;
     }
@@ -573,7 +621,7 @@ const meta = getMeta();
       w.mistake = true;
       wrongStreak++;
       if (w.el) {
-        w.el.classList.add('current', 'wrong');
+        w.el.classList.add('current', 'wrong', 'missed');
         setTimeout(() => w.el?.classList.remove('wrong'), 800);
       }
       say(wrongStreak >= 3 ? `Heard “${heard}”. Try the hint if you are stuck.` : `Heard “${heard}”. That is not the next word. Try again.`, 'bad');
@@ -593,17 +641,17 @@ const meta = getMeta();
       setTimeout(() => document.querySelectorAll('.practice .w.replay').forEach((x) => x.classList.remove('replay')), 900);
     }
     function findBacktrack(spoken, i, th) {
-      let best = null;
-      for (let k = 1; k <= 3 && pos - k >= 0; k++) {
+      // A reciter may step back a few words, or to the start of the ayah, as in normal recitation.
+      let near = null;
+      for (let k = 1; k <= 12 && pos - k >= 0; k++) {
         const idx = pos - k;
         if (flat[idx].state === 'skipped') break;
         if (!matchAt(spoken, i, flat, idx, th).n) continue;
-        // prefer a start where the following spoken word also continues the repeat
         const follows = spoken[i + 1] && idx + 1 < pos && matchAt(spoken, i + 1, flat, idx + 1, th).n;
         if (follows) return idx;
-        best ??= idx;
+        if (k <= 3) near ??= idx;   // a single matching word is only trusted for a short step back
       }
-      return best;
+      return near;
     }
 
     function finishAll() {
@@ -730,7 +778,9 @@ const meta = getMeta();
             if (back >= pos) endReplay();
             continue;
           }
-          // 4. an extra word from the speech engine, followed by the right word: ignore it
+          // 4. another of the engine's guesses heard the right word
+          if (altHeard(res, i, th)) { if (back !== null) endReplay(); i++; used[r] = i; accept(1, false); continue; }
+          // 5. an extra word from the speech engine, followed by the right word: ignore it
           if (spoken[i + 1] && matchAt(spoken, i + 1, flat, pos, th).n) { i++; used[r] = i; continue; }
           // 5. interim text may still change; judge it once it is final
           if (!res.isFinal) break;
@@ -746,7 +796,7 @@ const meta = getMeta();
       rec.lang = 'ar-SA';
       rec.continuous = true;
       rec.interimResults = true;
-      rec.maxAlternatives = 1;
+      rec.maxAlternatives = 3;
       used = {};
       rec.onresult = (e) => { rec.__lastResults = e.results; processResults(e.results, e.resultIndex); };
       rec.onerror = (e) => {
