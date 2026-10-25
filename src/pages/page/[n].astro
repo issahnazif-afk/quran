@@ -1,0 +1,143 @@
+---
+import Base from '../../layouts/Base.astro';
+import Player from '../../components/Player.astro';
+import cfg from '../../../site.config.mjs';
+import { getMeta, getPage, arNum } from '../../lib/data.mjs';
+import { u } from '../../lib/url.mjs';
+
+export function getStaticPaths() {
+  return Array.from({ length: getMeta().pages.length }, (_, i) => ({ params: { n: String(i + 1) } }));
+}
+const p = Number(Astro.params.n);
+const meta = getMeta();
+const total = meta.pages.length;
+const items = getPage(p);
+const first = items[0];
+const juz = first.ay.juz;
+const surahNames = [...new Set(items.map((x) => x.sura.ar))].join(' · ');
+const enNames = [...new Set(items.map((x) => x.sura.en))].join(', ');
+---
+<Base title={`Mushaf page ${p}`} active="mushaf" description={`Page ${p} of the Madani mushaf: ${enNames}.`}>
+  <style>
+    .bar { background: var(--surface); border-bottom: 1px solid var(--line); }
+    .bar .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding-top: 12px; padding-bottom: 12px; }
+    .spacer { flex: 1 1 auto; }
+    .stage { display: flex; justify-content: center; padding: 32px 24px; }
+    .paper { width: 100%; max-width: 640px; min-height: 860px; background: var(--paper); border: 1px solid var(--paper-line); border-radius: 4px; padding: 28px clamp(16px, 4vw, 40px); display: flex; flex-direction: column; gap: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    .running { display: flex; justify-content: space-between; font-family: var(--font-ar-ui); font-size: 14px; color: var(--paper-ink); }
+    .banner { border: 2px solid var(--paper-line); border-radius: 6px; padding: 8px; text-align: center; font-family: var(--font-quran); font-size: 26px; color: var(--paper-ink); }
+    .bism { text-align: center; font-family: var(--font-quran); font-size: 28px; line-height: 2; }
+    .text { font-family: var(--font-quran); font-size: clamp(22px, 3.4vw, 30px); line-height: 2.3; text-align: justify; text-align-last: center; direction: rtl; }
+    .ay { cursor: pointer; border-radius: 4px; }
+    .ay:hover, .ay.sel { background: var(--accent-soft); }
+    .ay.playing { background: var(--mark); }
+    .folio { margin-top: auto; text-align: center; font-family: var(--font-ar-ui); color: var(--paper-ink); }
+    .info { max-width: 640px; margin: 0 auto 32px; padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
+    .info-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  </style>
+
+  <div class="bar">
+    <div class="wrap">
+      {p < total
+        ? <a class="btn" href={u(`page/${p + 1}/`)} rel="next" aria-label="Next page">← Next</a>
+        : <span class="btn" aria-disabled="true">← Next</span>}
+      <form class="control" id="jump">
+        <label class="field-label" for="pg">Page</label>
+        <input class="field" id="pg" type="number" min="1" max={total} value={p} style="width:90px" />
+        <span class="muted">of {total}</span>
+      </form>
+      {p > 1
+        ? <a class="btn" href={u(`page/${p - 1}/`)} rel="prev" aria-label="Previous page">Previous →</a>
+        : <span class="btn" aria-disabled="true">Previous →</span>}
+      <span class="muted">{enNames}, juz {juz}</span>
+      <span class="spacer"></span>
+      <button class="btn btn-primary" type="button" id="play-page">Play page</button>
+    </div>
+  </div>
+
+  <div class="stage">
+    <article class="paper" lang="ar" dir="rtl" aria-label={`Mushaf page ${p}`}>
+      <div class="running"><span>{surahNames}</span><span>الجزء {arNum(juz)}</span></div>
+      {(() => {
+        // group consecutive ayahs; break the flow at every surah start
+        const blocks = [];
+        for (const it of items) {
+          if (it.ay.a === 1 || blocks.length === 0) blocks.push({ start: it.ay.a === 1, sura: it.sura, s: it.s, list: [] });
+          blocks[blocks.length - 1].list.push(it);
+        }
+        return blocks.map((b) => (
+          <>
+            {b.start && <div class="banner">سورة {b.sura.ar}</div>}
+            {b.start && b.sura.bismillah && b.s !== 1 && <div class="bism">{b.sura.bismillah}</div>}
+            <div class="text">
+              {b.list.map((it) => (
+                <>
+                  <span class="ay" tabindex="0" role="button" data-s={it.s} data-a={it.ay.a}
+                    data-en={it.sura.en} data-tr={it.ay.tr[cfg.defaultTranslation]}>{it.ay.ar} <span class="marker">﴿{arNum(it.ay.a)}﴾</span></span>{' '}
+                </>
+              ))}
+            </div>
+          </>
+        ));
+      })()}
+      <div class="folio">{arNum(p)}</div>
+    </article>
+  </div>
+
+  <section class="card info" id="info" hidden aria-live="polite">
+    <b id="info-key"></b>
+    <p id="info-tr" style="margin:0;font-size:16px;line-height:1.6" lang="en"></p>
+    <div class="info-actions">
+      <button class="btn" type="button" id="info-play">Play</button>
+      <a class="btn" id="info-study" href="#">Study this ayah</a>
+      <a class="btn" id="info-read" href="#">Read in surah</a>
+    </div>
+  </section>
+
+  <Player />
+
+  <script>
+    import { initPlayer, lastRead } from '../../lib/client.mjs';
+    import { u } from '../../lib/url.mjs';
+
+    const ayahs = [...document.querySelectorAll('.ay')];
+    const player = initPlayer();
+    player.setQueue(ayahs.map((el) => ({ s: +el.dataset.s, a: +el.dataset.a, label: `${el.dataset.en}, ${el.dataset.s}:${el.dataset.a}` })));
+    document.getElementById('play-page').addEventListener('click', () => player.playAll());
+    document.addEventListener('ql:ayah', (e) => {
+      ayahs.forEach((el) => el.classList.toggle('playing', `${el.dataset.s}:${el.dataset.a}` === e.detail.key));
+    });
+
+    const info = document.getElementById('info');
+    let selKey = null;
+    function select(el) {
+      ayahs.forEach((x) => x.classList.toggle('sel', x === el));
+      selKey = `${el.dataset.s}:${el.dataset.a}`;
+      document.getElementById('info-key').textContent = `${el.dataset.en} ${selKey}`;
+      document.getElementById('info-tr').textContent = el.dataset.tr;
+      document.getElementById('info-study').href = u(`ayah/?k=${selKey}`);
+      document.getElementById('info-read').href = u(`surah/${el.dataset.s}/#a${el.dataset.a}`);
+      info.hidden = false;
+      lastRead.set({ s: +el.dataset.s, a: +el.dataset.a });
+    }
+    ayahs.forEach((el) => {
+      el.addEventListener('click', () => select(el));
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(el); } });
+    });
+    document.getElementById('info-play').addEventListener('click', () => selKey && player.playAt(selKey));
+
+    const total = Number(document.getElementById('pg').max);
+    const here = Number(document.getElementById('pg').value);
+    document.getElementById('jump').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const n = Math.min(total, Math.max(1, parseInt(document.getElementById('pg').value, 10) || 1));
+      location.href = u(`page/${n}/`);
+    });
+    // Arrow keys follow the mushaf: left = next page, right = previous page.
+    document.addEventListener('keydown', (e) => {
+      if (e.target.closest('input, select, textarea')) return;
+      if (e.key === 'ArrowLeft' && here < total) location.href = u(`page/${here + 1}/`);
+      if (e.key === 'ArrowRight' && here > 1) location.href = u(`page/${here - 1}/`);
+    });
+  </script>
+</Base>
