@@ -45,6 +45,7 @@ import Player from '../../components/Player.astro';
           <a class="btn" data-x="prev">Previous ayah</a>
           <button class="btn btn-primary" type="button" data-x="play">Play</button>
           <button class="btn" type="button" data-x="save" aria-pressed="false">Bookmark</button>
+          <a class="btn" data-x="recite">Recite from memory</a>
           <a class="btn" data-x="next">Next ayah</a>
         </div>
       </div>
@@ -133,6 +134,7 @@ import Player from '../../components/Player.astro';
       prevKey ? (x('prev').href = u(`ayah/?k=${prevKey}`)) : x('prev').remove();
       nextKey ? (x('next').href = u(`ayah/?k=${nextKey}`)) : x('next').remove();
 
+      x('recite').href = u(`practice/?s=${s}&from=${a}&to=${a}`);
       const saveBtn = x('save');
       saveBtn.setAttribute('aria-pressed', String(bookmarks.has(`${s}:${a}`)));
       saveBtn.addEventListener('click', () => saveBtn.setAttribute('aria-pressed', String(bookmarks.toggle(`${s}:${a}`))));

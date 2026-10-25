@@ -65,6 +65,7 @@ const juz = s.ayahs[0].juz;
         <div class="actions">
           <button class="btn btn-primary" type="button" id="play-all">Play surah</button>
           <a class="btn" href={u(`page/${s.page}/`)}>Open in mushaf</a>
+          <a class="btn" href={u(`practice/?s=${n}&from=1&to=${Math.min(s.ayahs.length, 10)}`)}>Recite from memory</a>
         </div>
       </section>
 
