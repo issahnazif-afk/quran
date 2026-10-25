@@ -109,7 +109,7 @@ const meta = getMeta();
           <input class="field" id="p-to" type="number" min="1" value="7" style="width:90px" />
         </div>
       </div>
-      <p class="muted" data-for="follow" hidden style="margin:0">Start reciting from any ayah in the Quran. After a few words the mushaf opens at your surah and page, then follows you page by page, and into the next surah. If you jump to another place, it finds you again.</p>
+      <p class="muted" data-for="follow" hidden style="margin:0">Start reciting from any ayah in the Quran. After a few words the mushaf opens at your surah and page. From then on it expects you to recite in order: ayah by ayah, page by page, and on into the next surah. To start somewhere else, press “Change settings” and start again.</p>
       <div class="fields">
         <div class="control">
           <label class="field-label" for="p-strict">Checking</label>
@@ -204,7 +204,6 @@ const meta = getMeta();
     let appending = false;
     let stats = { words: 0, first: 0, help: 0 };
     let wrongStreak = 0;
-    let recent = [];     // last words heard, used to find the reader again if they jump
 
     // ── setup ──────────────────────────────────────────────────
     const surahSel = $('p-surah'), fromEl = $('p-from'), toEl = $('p-to');
@@ -273,7 +272,7 @@ const meta = getMeta();
     }
 
     function resetSession() {
-      items = []; flat = []; pos = 0; wrongStreak = 0; recent = [];
+      items = []; flat = []; pos = 0; wrongStreak = 0;
       stats = { words: 0, first: 0, help: 0 };
       queue.length = 0; running = false;
       $('choices').hidden = true; $('heard').textContent = '';
@@ -542,22 +541,6 @@ const meta = getMeta();
         setTimeout(() => w.el?.classList.remove('wrong'), 700);
       }
       say(wrongStreak >= 3 ? `Heard “${heard}”. Try the hint if you are stuck.` : `Heard “${heard}”. That is not the next word. Try again.`, 'bad');
-      // In follow mode, several misses in a row usually mean the reader moved somewhere else.
-      if (mode === 'follow' && wrongStreak >= 4 && locator) {
-        const windowWords = recent.slice(-8);
-        const r = locate(locator, windowWords, threshold());
-        // only move if the match runs right up to the newest word heard
-        if (r?.found && r.found.lastJ === windowWords.length - 1) {
-          const ref = locator.R[r.found.start];
-          const here = flat[pos];
-          if (!(here && ref[0] === here.item.s && ref[1] === here.item.a)) {
-            consumeAll();
-            say('You moved. Finding your place…');
-            jumpTo(r.found, true);
-            return true;
-          }
-        }
-      }
       return false;
     }
 
@@ -620,7 +603,9 @@ const meta = getMeta();
         if (heard.length >= 10) say('Still listening. Keep reciting, or check the microphone is close.');
         return;
       }
-      if (res.found) { consumeAll(); $('heard').textContent = ''; jumpTo(res.found, true); return; }
+      // Lock on only when sure: once found, tracking is strictly sequential and never jumps.
+      if (res.found && (res.found.matched >= 4 || heard.length >= 6)) { consumeAll(); $('heard').textContent = ''; jumpTo(res.found, true); return; }
+      if (res.found) { say('Almost there. Keep reciting…'); return; }
       if (heard.length >= 9) showChoices(res.ambiguous);
       else say('This passage appears in more than one place. Keep reciting…');
     }
@@ -645,12 +630,9 @@ const meta = getMeta();
             }
           }
           if (m.n) {
-            if (res.isFinal) recent.push(...spoken.slice(i, i + m.n));
             i += m.n; used[r] = i; accept(m.e, false); continue;
           }
           if (!res.isFinal) break;   // interim text may still change; judge it once it is final
-          recent.push(spoken[i]);
-          if (recent.length > 16) recent = recent.slice(-16);
           i++; used[r] = i;
           if (reject(spoken[i - 1])) return;
         }
