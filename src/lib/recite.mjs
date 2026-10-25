@@ -100,3 +100,65 @@ export function matchAt(spoken, i, words, next, threshold) {
 }
 
 export const THRESHOLDS = { strict: 0.85, normal: 0.7, lenient: 0.55 };
+
+// ── Finding where the reader is ─────────────────────────────────
+// rows: [[surah, ayah, "w1 w2 …"], …] using the same plain words as tokenize().
+export function buildLocator(rows) {
+  const W = [], R = [], exact = new Map();
+  for (const [s, a, str] of rows) {
+    str.split(' ').filter(Boolean).forEach((w, i) => {
+      if (!exact.has(w)) exact.set(w, []);
+      exact.get(w).push(W.length);
+      W.push(w);
+      R.push([s, a, i]);
+    });
+  }
+  return { W, R, exact };
+}
+
+function candidatesFor(L, word, threshold) {
+  const hit = L.exact.get(word);
+  if (hit) return hit;
+  const out = [];
+  for (let p = 0; p < L.W.length; p++) {
+    const w = L.W[p];
+    if (Math.abs(w.length - word.length) > 2 || w[0] !== word[0]) continue;
+    if (wordMatches(word, w, threshold)) out.push(p);
+  }
+  return out;
+}
+
+// spoken: plain words just heard (newest last).
+// Returns { found: {start, last} } with positions in L, or { ambiguous: [...] }, or null.
+export function locate(L, spoken, threshold = THRESHOLDS.normal) {
+  const n = spoken.length;
+  if (n < 3) return null;
+  const found = new Map(); // keyed by last matched position
+  const starts = [];
+  for (let k = 0; k <= n - 3; k++) {
+    for (const p of candidatesFor(L, spoken[k], threshold)) starts.push([k, p, 1]);
+    // the engine may split one written word in two (يا ايها → ياايها)
+    for (const p of candidatesFor(L, spoken[k] + spoken[k + 1], threshold)) starts.push([k, p, 2]);
+  }
+  {
+    for (const [k, p, used] of starts) {
+      let j = k + used, q = p + 1, matched = 1, misses = 0, lastJ = k + used - 1, lastQ = p;
+      while (j < n && q < L.W.length) {
+        if (wordMatches(spoken[j], L.W[q], threshold)) { matched++; lastJ = j; lastQ = q; j++; q++; misses = 0; continue; }
+        if (q + 1 < L.W.length && wordMatches(spoken[j], L.W[q] + L.W[q + 1], threshold)) { matched += 2; lastJ = j; lastQ = q + 1; j++; q += 2; misses = 0; continue; }
+        if (j + 1 < n && wordMatches(spoken[j] + spoken[j + 1], L.W[q], threshold)) { matched++; lastJ = j + 1; lastQ = q; j += 2; q++; misses = 0; continue; }
+        if (++misses > 1) break;
+        j++; // the speech engine heard an extra word; skip it
+      }
+      if (matched < 3) continue;
+      const prev = found.get(lastQ);
+      if (!prev || matched > prev.matched) found.set(lastQ, { start: p, last: lastQ, matched, lastJ });
+    }
+  }
+  if (!found.size) return null;
+  const list = [...found.values()].sort((x, y) => y.lastJ - x.lastJ || y.matched - x.matched);
+  const best = list[0];
+  const rivals = list.filter((c) => c.lastJ === best.lastJ && c.matched === best.matched);
+  if (rivals.length === 1 && (best.matched >= 4 || best.lastJ === n - 1)) return { found: best };
+  return { ambiguous: rivals.slice(0, 4) };
+}

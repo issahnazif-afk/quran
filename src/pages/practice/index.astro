@@ -28,6 +28,9 @@ const meta = getMeta();
     .practice .status.bad { color: #B3261E; }
     .practice .status.good { color: var(--accent-strong); }
     .practice .where { text-align: center; font-size: 13px; color: var(--muted); }
+    .practice .heard { text-align: center; font-family: var(--font-ar-ui); font-size: 14px; color: var(--muted); min-height: 1.4em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .practice .choices { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; align-items: center; }
+    .practice .waiting { flex: 1 1 auto; display: grid; place-items: center; text-align: center; font-family: var(--font-ui); color: var(--muted); font-size: 16px; padding: 40px 12px; }
     .practice .progress { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
     .practice .progress span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease-out; }
 
@@ -87,8 +90,8 @@ const meta = getMeta();
 
     <form class="card setup" id="setup">
       <div class="modes" role="tablist" aria-label="Practise by">
-        <button type="button" role="tab" aria-selected="true" data-mode="surah">Surah and ayahs</button>
-        <button type="button" role="tab" aria-selected="false" data-mode="page">Mushaf pages</button>
+        <button type="button" role="tab" aria-selected="true" data-mode="surah">Choose a surah</button>
+        <button type="button" role="tab" aria-selected="false" data-mode="follow">Follow my recitation</button>
       </div>
       <div class="fields" data-for="surah">
         <div class="control">
@@ -106,16 +109,7 @@ const meta = getMeta();
           <input class="field" id="p-to" type="number" min="1" value="7" style="width:90px" />
         </div>
       </div>
-      <div class="fields" data-for="page" hidden>
-        <div class="control">
-          <label class="field-label" for="p-page-from">From page</label>
-          <input class="field" id="p-page-from" type="number" min="1" max={meta.pages.length} value="1" style="width:100px" />
-        </div>
-        <div class="control">
-          <label class="field-label" for="p-page-to">To page</label>
-          <input class="field" id="p-page-to" type="number" min="1" max={meta.pages.length} value="1" style="width:100px" />
-        </div>
-      </div>
+      <p class="muted" data-for="follow" hidden style="margin:0">Start reciting from any ayah in the Quran. After a few words the mushaf opens at your surah and page, then follows you page by page, and into the next surah. If you jump to another place, it finds you again.</p>
       <div class="fields">
         <div class="control">
           <label class="field-label" for="p-strict">Checking</label>
@@ -154,9 +148,12 @@ const meta = getMeta();
         <button class="btn" type="button" id="reveal">Show next word</button>
         <button class="btn" type="button" id="listen">Listen</button>
         <button class="btn" type="button" id="restart">Restart ayah</button>
+        <button class="btn" type="button" id="finish" hidden>Finish</button>
       </div>
       <p class="status" id="status" aria-live="polite"></p>
+      <div class="choices" id="choices" hidden></div>
       <div class="where" id="where"></div>
+      <div class="heard" id="heard" lang="ar" dir="rtl" aria-hidden="true"></div>
     </div>
 
     <div class="stage" id="stage" hidden></div>
@@ -185,7 +182,7 @@ const meta = getMeta();
   <script>
     import cfg from '../../../site.config.mjs';
     import { getJson, pad, settings, store, audioUrl } from '../../lib/client.mjs';
-    import { tokenize, normalize, matchAt, THRESHOLDS } from '../../lib/recite.mjs';
+    import { tokenize, normalize, matchAt, THRESHOLDS, buildLocator, locate } from '../../lib/recite.mjs';
     import { u } from '../../lib/url.mjs';
 
     const $ = (id) => document.getElementById(id);
@@ -194,23 +191,27 @@ const meta = getMeta();
     const arNum = (n) => String(n).replace(/\d/g, (d) => AR[d]);
     const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
     const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+    const threshold = () => THRESHOLDS[$('p-strict').value] ?? THRESHOLDS.normal;
 
-    let meta;
+    let meta, locator = null;
     let mode = 'surah';
+    let phase = 'idle';  // idle | locating | tracking | done
     let items = [];      // ayahs (and Bismillahs) to recite, in order
     let flat = [];       // every word to recite, in order
     let pos = 0;         // index in flat of the next word to recite
-    let shownPage = 0;   // page currently on screen
-    let pageQueue = 0;   // last page the reveal queue will have shown
+    let shownPage = 0;
+    let lastSurah = 0;   // follow mode: last surah loaded into items
+    let appending = false;
     let stats = { words: 0, first: 0, help: 0 };
     let wrongStreak = 0;
+    let recent = [];     // last words heard, used to find the reader again if they jump
 
     // ── setup ──────────────────────────────────────────────────
     const surahSel = $('p-surah'), fromEl = $('p-from'), toEl = $('p-to');
     function syncRange() {
       const max = Number(surahSel.selectedOptions[0].dataset.ayahs);
       fromEl.max = toEl.max = String(max);
-      fromEl.value = '1'; toEl.value = String(Math.min(max, 7));
+      fromEl.value = '1'; toEl.value = String(max);
     }
     surahSel.addEventListener('change', syncRange);
     document.querySelectorAll('.modes button').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
@@ -221,21 +222,17 @@ const meta = getMeta();
     }
 
     const params = new URLSearchParams(location.search);
-    const last = store.get('practice2', null);
-    if (params.get('page')) {
-      setMode('page');
-      $('p-page-from').value = params.get('page');
-      $('p-page-to').value = params.get('to') ?? params.get('page');
-    } else {
-      surahSel.value = params.get('s') ?? (last?.s ? String(last.s) : '1');
-      syncRange();
-      if (params.get('from')) { fromEl.value = params.get('from'); toEl.value = params.get('to') ?? params.get('from'); }
-      else if (last?.mode === 'surah' && String(last.s) === surahSel.value) { fromEl.value = String(last.from); toEl.value = String(last.to); }
-    }
+    const last = store.get('practice3', null);
+    if (params.get('follow') || (!params.get('s') && last?.mode === 'follow')) setMode('follow');
+    surahSel.value = params.get('s') ?? (last?.s ? String(last.s) : '1');
+    syncRange();
+    if (params.get('from')) { fromEl.value = params.get('from'); toEl.value = params.get('to') ?? params.get('from'); }
+    else if (last?.mode === 'surah' && String(last.s) === surahSel.value) { fromEl.value = String(last.from); toEl.value = String(last.to); }
     if (!SR) { $('unsupported').hidden = false; $('mic').hidden = true; }
 
     $('change').addEventListener('click', () => {
       stopListening();
+      phase = 'idle';
       $('setup').hidden = false; $('intro').hidden = false; $('summary-bar').hidden = true;
       $('setup').scrollIntoView({ block: 'start' });
     });
@@ -254,7 +251,6 @@ const meta = getMeta();
       }
       return out;
     }
-
     const trOf = (ay) => ay.tr[settings.translation] ?? ay.tr[cfg.defaultTranslation] ?? '';
     function makeItem(s, sura, ay, isBism) {
       const it = isBism
@@ -264,71 +260,134 @@ const meta = getMeta();
       it.words.forEach((w, i) => Object.assign(w, { item: it, wi: i, state: 'hidden', page: it.page, mistake: false }));
       return it;
     }
+    // Ayahs of surah s from ayah `from` (optionally to `to`), with its Bismillah if it starts at ayah 1.
+    async function surahItems(s, from = 1, to = Infinity, withBism = $('p-bism').checked) {
+      const sura = await getJson(`surah/${pad(s)}.json`);
+      const out = [];
+      for (const ay of sura.ayahs) {
+        if (ay.a < from || ay.a > to) continue;
+        if (ay.a === 1 && withBism && sura.bismillah && s !== 1) out.push(makeItem(s, sura, ay, true));
+        out.push(makeItem(s, sura, ay, false));
+      }
+      return { sura, out };
+    }
+
+    function resetSession() {
+      items = []; flat = []; pos = 0; wrongStreak = 0; recent = [];
+      stats = { words: 0, first: 0, help: 0 };
+      queue.length = 0; running = false;
+      $('choices').hidden = true; $('heard').textContent = '';
+      $('tr-panel').hidden = true; $('summary').hidden = true;
+    }
+    function showWorkspace(summary) {
+      $('summary-text').textContent = `${summary}, ${$('p-strict').selectedOptions[0].textContent.toLowerCase()} checking`;
+      $('setup').hidden = true; $('intro').hidden = true;
+      $('summary-bar').hidden = false;
+      $('toolbar').hidden = false; $('stage').hidden = false; $('note').hidden = false;
+      $('finish').hidden = mode !== 'follow';
+      document.querySelector('.practice .progress').hidden = mode === 'follow';
+    }
+    function setTools(enabled) { ['hint', 'reveal', 'restart', 'listen'].forEach((id) => ($(id).disabled = !enabled)); }
 
     $('setup').addEventListener('submit', async (e) => {
       e.preventDefault();
       stopListening();
       meta ??= await getJson('meta.json');
-      items = [];
-      const bism = $('p-bism').checked;
-      let summary;
+      resetSession();
+
       if (mode === 'surah') {
         const s = Number(surahSel.value);
-        const sura = await getJson(`surah/${pad(s)}.json`);
-        const max = sura.ayahs.length;
+        const max = Number(surahSel.selectedOptions[0].dataset.ayahs);
         const from = Math.min(max, Math.max(1, parseInt(fromEl.value, 10) || 1));
-        const to = Math.min(max, Math.max(from, parseInt(toEl.value, 10) || from));
+        const to = Math.min(max, Math.max(from, parseInt(toEl.value, 10) || max));
         fromEl.value = String(from); toEl.value = String(to);
-        for (const ay of sura.ayahs.filter((x) => x.a >= from && x.a <= to)) {
-          if (ay.a === 1 && bism && sura.bismillah && s !== 1) items.push(makeItem(s, sura, ay, true));
-          items.push(makeItem(s, sura, ay, false));
-        }
-        store.set('practice2', { mode, s, from, to });
+        const { sura, out } = await surahItems(s, from, to);
+        items = out; flat = items.flatMap((it) => it.words);
+        lastSurah = s;
+        store.set('practice3', { mode, s, from, to });
         history.replaceState(null, '', `?s=${s}&from=${from}&to=${to}`);
-        summary = `${sura.en}, ayahs ${from} to ${to}`;
         $('read-link').href = u(`surah/${s}/#a${from}`);
+        showWorkspace(from === 1 && to === max ? `${sura.en}, whole surah` : `${sura.en}, ayahs ${from} to ${to}`);
+        phase = 'tracking';
+        setTools(true);
+        await renderPage(flat[0].page, false);
+        updateCurrent();
+        say(SR ? `Press “Start reciting” and recite ${flat[0].item.a ? 'the first word' : 'the Bismillah'}.` : 'Recite the first word, then press “Show next word” to check.');
       } else {
-        const total = meta.pages.length;
-        const pf = Math.min(total, Math.max(1, parseInt($('p-page-from').value, 10) || 1));
-        const pt = Math.min(total, Math.max(pf, parseInt($('p-page-to').value, 10) || pf));
-        $('p-page-from').value = String(pf); $('p-page-to').value = String(pt);
-        for (let p = pf; p <= pt; p++) {
-          for (const { s, sura, ay } of await ayahsOfPage(p)) {
-            if (ay.a === 1 && bism && sura.bismillah && s !== 1) items.push(makeItem(s, sura, ay, true));
-            items.push(makeItem(s, sura, ay, false));
-          }
-        }
-        store.set('practice2', { mode, pf, pt });
-        history.replaceState(null, '', `?page=${pf}&to=${pt}`);
-        summary = pf === pt ? `Mushaf page ${pf}` : `Mushaf pages ${pf} to ${pt}`;
-        $('read-link').href = u(`page/${pf}/`);
+        store.set('practice3', { mode });
+        history.replaceState(null, '', '?follow=1');
+        showWorkspace('Following your recitation');
+        phase = 'locating';
+        setTools(false);
+        renderWaiting();
+        $('where').textContent = '';
+        if (!SR) { say('Following needs speech checking. Open this page in Chrome, Edge or Safari.', 'bad'); return; }
+        say('Loading…');
+        if (!locator) locator = buildLocator(await getJson('recite-index.json'));
+        say('Press “Start reciting” and recite from any ayah.');
+        startListening();
       }
-      flat = items.flatMap((it) => it.words);
-      pos = 0; wrongStreak = 0;
-      stats = { words: 0, first: 0, help: 0 };
-      queue.length = 0; running = false;
-
-      $('summary-text').textContent = `${summary}, ${$('p-strict').selectedOptions[0].textContent.toLowerCase()} checking`;
-      $('setup').hidden = true; $('intro').hidden = true;
-      $('summary-bar').hidden = false; $('summary').hidden = true;
-      $('toolbar').hidden = false; $('stage').hidden = false; $('note').hidden = false;
-      $('tr-panel').hidden = true;
-      ['hint', 'reveal', 'restart', 'listen'].forEach((id) => ($(id).disabled = false));
-
-      pageQueue = flat[0].page;
-      await renderPage(flat[0].page, false);
-      updateCurrent();
-      const first = flat[0].item.a ? 'the first word' : 'the Bismillah';
-      say(SR ? `Press “Start reciting” and recite ${first}.` : `Recite ${first}, then press “Show next word” to check.`);
       window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
     });
 
-    // ── the page ───────────────────────────────────────────────
-    const itemByKey = () => new Map(items.map((it) => [it.key, it]));
+    // ── following: find the reader, then keep tracking ─────────
+    function renderWaiting() {
+      const paper = el('article', 'paper');
+      paper.append(el('div', 'waiting', 'Start reciting from any ayah. The mushaf opens where you are after a few words.'));
+      $('stage').replaceChildren(paper);
+      shownPage = 0;
+    }
 
+    async function jumpTo(found, announce) {
+      phase = 'jumping';
+      const [s, a, wi] = locator.R[found.start];
+      const lastRef = locator.R[found.last];
+      queue.length = 0;
+      const { out } = await surahItems(s, a, Infinity, false);
+      items = out; flat = items.flatMap((it) => it.words);
+      lastSurah = s;
+      for (let i = 0; i < wi; i++) items[0].words[i].state = 'skipped';
+      pos = wi;
+      const endIdx = flat.findIndex((w) => w.item.s === lastRef[0] && w.item.a === lastRef[1] && w.wi === lastRef[2]);
+      phase = 'tracking';
+      setTools(true);
+      $('choices').hidden = true;
+      $('read-link').href = u(`surah/${s}/#a${a}`);
+      await renderPage(flat[pos].page, true);
+      if (announce) say(`Found you at ${items[0].label}.`, 'good');
+      if (endIdx >= pos) accept(endIdx - pos + 1, false, true);
+      ensureAhead();
+      // words heard while the page was opening still count
+      if (rec?.__lastResults) processResults(rec.__lastResults, 0);
+    }
+
+    async function ensureAhead() {
+      if (mode !== 'follow' || appending || lastSurah >= 114 || flat.length - pos > 30) return;
+      appending = true;
+      try {
+        const { out } = await surahItems(lastSurah + 1);
+        items.push(...out); flat.push(...out.flatMap((it) => it.words));
+        lastSurah++;
+      } finally { appending = false; }
+    }
+
+    function showChoices(list) {
+      const box = $('choices');
+      box.replaceChildren(el('span', 'muted', 'Which one are you reciting?'));
+      for (const c of list) {
+        const [s, a] = locator.R[c.start];
+        const b = el('button', 'btn', `${meta.surahs[s - 1].en} ${s}:${a}`);
+        b.type = 'button';
+        b.addEventListener('click', () => { consumeAll(); jumpTo(c, true); });
+        box.append(b);
+      }
+      box.hidden = false;
+    }
+
+    // ── the page ───────────────────────────────────────────────
     async function renderPage(p, animate) {
       const entries = await ayahsOfPage(p);
-      const map = itemByKey();
+      const map = new Map(items.map((it) => [it.key, it]));
       const paper = el('article', 'paper');
       paper.lang = 'ar'; paper.dir = 'rtl';
       paper.setAttribute('aria-label', `Mushaf page ${p}`);
@@ -342,7 +401,8 @@ const meta = getMeta();
 
       let text = null;
       const wordSpan = (w) => {
-        const sp = el('span', w.state === 'shown' ? 'w' : 'w hidden', w.display);
+        const cls = w.state === 'shown' ? 'w' : w.state === 'skipped' ? 'w out' : 'w hidden';
+        const sp = el('span', cls, w.display);
         if (w.helped) sp.classList.add('helped');
         if (w.hint && w.state === 'hidden') sp.classList.add('hint');
         w.el = sp;
@@ -363,14 +423,13 @@ const meta = getMeta();
         if (!text) { text = el('div', 'text'); paper.append(text); }
         const it = map.get(`${s}:${ay.a}`);
         if (it) {
-          const last = it.words.length - 1;
-          it.words.forEach((w, i) => { if (i < last) text.append(wordSpan(w), ' '); });
-          // keep the last word and the ayah marker together on one line
+          const lastW = it.words.length - 1;
+          it.words.forEach((w, i) => { if (i < lastW) text.append(wordSpan(w), ' '); });
           const tail = el('span');
           tail.style.whiteSpace = 'nowrap';
           const mk = el('span', 'mk w' + (it.done ? '' : ' hidden'), `﴿${arNum(ay.a)}﴾`);
           it.mk = mk;
-          tail.append(wordSpan(it.words[last]), ' ', mk);
+          tail.append(wordSpan(it.words[lastW]), ' ', mk);
           text.append(tail, ' ');
         } else {
           text.append(el('span', 'out', ay.ar), ' ', el('span', 'mk out', `﴿${arNum(ay.a)}﴾`), ' ');
@@ -382,7 +441,7 @@ const meta = getMeta();
       shownPage = p;
     }
 
-    // ── reveal queue: words are written one after another, never all at once ──
+    // ── reveal queue: words are written one after another ──────
     const queue = [];
     let running = false;
     function enqueue(fn) { queue.push(fn); if (!running) drain(); }
@@ -391,21 +450,18 @@ const meta = getMeta();
       while (queue.length) await queue.shift()();
       running = false;
       updateCurrent();
-      if (pos >= flat.length && flat.length) finishAll();
+      if (phase === 'tracking' && pos >= flat.length && flat.length && !(mode === 'follow' && lastSurah < 114)) finishAll();
     }
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-
     function inkDuration(w) {
-      const letters = Math.max(1, w.plain.length);
       const backlog = queue.length;
       const perLetter = backlog > 4 ? 35 : backlog > 1 ? 55 : 80;   // catch up when speech runs ahead
-      return Math.min(900, Math.max(240, letters * perLetter));
+      return Math.min(900, Math.max(240, Math.max(1, w.plain.length) * perLetter));
     }
-
     function revealStep(w) {
       return async () => {
         if (w.page !== shownPage) {
-          await wait(reduceMotion ? 300 : 1000);   // let the reader see the finished page before it turns
+          if (shownPage) await wait(reduceMotion ? 300 : 1000);   // let the reader see the finished page before it turns
           await renderPage(w.page, true);
           await wait(reduceMotion ? 0 : 380);
         }
@@ -416,8 +472,7 @@ const meta = getMeta();
         sp.style.setProperty('--dur', `${dur}ms`);
         sp.classList.add('ink');
         if (w.helped) sp.classList.add('helped');
-        // Overlap the next word slightly so the writing flows on without a pause.
-        await wait(dur * 0.82);
+        await wait(dur * 0.82);   // overlap the next word slightly so the writing flows on
         setTimeout(() => { sp.classList.remove('ink'); sp.style.removeProperty('--dur'); }, dur * 0.25);
         w.state = 'shown';
         if (w.wi === w.item.words.length - 1) {
@@ -443,9 +498,9 @@ const meta = getMeta();
 
     function updateCurrent() {
       document.querySelectorAll('.practice .w.current').forEach((x) => x.classList.remove('current'));
+      $('bar').style.width = mode === 'surah' && flat.length ? `${(pos / flat.length) * 100}%` : '0';
       const w = flat[pos];
-      $('bar').style.width = flat.length ? `${(pos / flat.length) * 100}%` : '0';
-      if (!w) return;
+      if (!w || phase !== 'tracking') return;
       if (w.page === shownPage && !running) w.el?.classList.add('current');
       const it = w.item;
       $('where').textContent = `${it.label}, word ${w.wi + 1} of ${it.words.length}, page ${w.page}`;
@@ -457,7 +512,7 @@ const meta = getMeta();
       st.className = 'status' + (kind ? ' ' + kind : '');
     }
 
-    function accept(count, helped) {
+    function accept(count, helped, quiet) {
       for (let k = 0; k < count && pos < flat.length; k++) {
         const w = flat[pos];
         w.state = 'queued';
@@ -468,10 +523,13 @@ const meta = getMeta();
         enqueue(revealStep(w));
       }
       wrongStreak = 0;
-      if (pos >= flat.length) say('Well done. That is the end of your range.', 'good');
-      else if (flat[pos].wi === 0 && flat[pos - 1]?.item !== flat[pos].item) say(`Ayah complete. Continue with ${flat[pos].item.a ? 'the next ayah' : 'the Bismillah'}.`, 'good');
-      else say(helped ? 'Shown. Recite the next word.' : 'Correct. Keep going.', 'good');
+      if (!quiet) {
+        if (pos >= flat.length) say('Well done. That is the end of your range.', 'good');
+        else if (flat[pos].wi === 0 && flat[pos - 1]?.item !== flat[pos].item) say(`Ayah complete. Continue with ${flat[pos].item.a ? 'the next ayah' : 'the Bismillah'}.`, 'good');
+        else say(helped ? 'Shown. Recite the next word.' : 'Correct. Keep going.', 'good');
+      }
       updateCurrent();
+      ensureAhead();
     }
 
     function reject(heard) {
@@ -484,68 +542,123 @@ const meta = getMeta();
         setTimeout(() => w.el?.classList.remove('wrong'), 700);
       }
       say(wrongStreak >= 3 ? `Heard “${heard}”. Try the hint if you are stuck.` : `Heard “${heard}”. That is not the next word. Try again.`, 'bad');
+      // In follow mode, several misses in a row usually mean the reader moved somewhere else.
+      if (mode === 'follow' && wrongStreak >= 4 && locator) {
+        const windowWords = recent.slice(-8);
+        const r = locate(locator, windowWords, threshold());
+        // only move if the match runs right up to the newest word heard
+        if (r?.found && r.found.lastJ === windowWords.length - 1) {
+          const ref = locator.R[r.found.start];
+          const here = flat[pos];
+          if (!(here && ref[0] === here.item.s && ref[1] === here.item.a)) {
+            consumeAll();
+            say('You moved. Finding your place…');
+            jumpTo(r.found, true);
+            return true;
+          }
+        }
+      }
+      return false;
     }
 
     function finishAll() {
+      phase = 'done';
       stopListening();
-      ['hint', 'reveal', 'restart'].forEach((id) => ($(id).disabled = true));
+      setTools(false);
       $('summary').hidden = false;
       $('sum-words').textContent = String(stats.words);
       $('sum-first').textContent = stats.words ? `${Math.round((stats.first / stats.words) * 100)}%` : '0%';
       $('sum-help').textContent = String(stats.help);
-      $('sum-title').textContent = stats.help === 0 ? 'Practice complete, with no help' : 'Practice complete';
+      $('sum-title').textContent = stats.help === 0 && stats.words ? 'Practice complete, with no help' : 'Practice complete';
       setTimeout(() => $('summary').scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' }), 600);
     }
 
+    $('finish').addEventListener('click', finishAll);
     $('again').addEventListener('click', () => $('setup').requestSubmit());
     $('hint').addEventListener('click', async () => {
       const w = flat[pos];
-      if (!w) return;
+      if (!w || phase !== 'tracking') return;
       if (w.page !== shownPage) await renderPage(w.page, true);
       w.hint = true;
       w.el?.classList.add('hint');
       say('The start of the next word is shown.');
     });
-    $('reveal').addEventListener('click', () => { if (pos < flat.length) accept(1, true); });
+    $('reveal').addEventListener('click', () => { if (phase === 'tracking' && pos < flat.length) accept(1, true); });
     $('restart').addEventListener('click', async () => {
-      if (running) return;
+      if (running || phase !== 'tracking' || !flat.length) return;
       const w = flat[Math.min(pos, flat.length - 1)];
       const it = w.item;
-      // go back to the first word of this ayah (or the previous one if this one has not started)
       const target = pos > 0 && flat[pos - 1].item === it ? it : w.wi === 0 && pos > 0 ? flat[pos - 1].item : it;
-      for (const x of target.words) { x.state = 'hidden'; x.hint = false; x.helped = false; x.mistake = false; }
+      for (const x of target.words) { if (x.state !== 'skipped') { x.state = 'hidden'; x.hint = false; x.helped = false; x.mistake = false; } }
       target.done = false;
-      pos = flat.indexOf(target.words[0]);
-      resetSpeechOffsets();
+      pos = flat.indexOf(target.words.find((x) => x.state !== 'skipped') ?? target.words[0]);
+      consumeAll();
       await renderPage(target.page, false);
       updateCurrent();
       say('Ayah cleared. Recite it again from the start.');
     });
 
     // ── listening ──────────────────────────────────────────────
-    let rec = null, listening = false, used = {};
-    function resetSpeechOffsets() {
+    let rec = null, listening = false, used = {}, lastLocate = 0;
+    const wordsOf = (res) => normalize(res[0].transcript).split(' ').filter(Boolean);
+    function consumeAll() {
       const r = rec?.__lastResults;
-      if (!r) return;
-      for (let k = 0; k < r.length; k++) used[k] = normalize(r[k][0].transcript).split(' ').filter(Boolean).length;
+      if (r) for (let k = 0; k < r.length; k++) used[k] = wordsOf(r[k]).length;
     }
+
+    function locating(results) {
+      // Gather the words heard since following started (newest last).
+      const heard = [];
+      for (let r = 0; r < results.length; r++) heard.push(...wordsOf(results[r]).slice(used[r] ?? 0));
+      $('heard').textContent = heard.slice(-8).join(' ');
+      const isFinal = results[results.length - 1]?.isFinal;
+      const now = Date.now();
+      if (!isFinal && now - lastLocate < 500) return;
+      lastLocate = now;
+      const res = locate(locator, heard.slice(-12), threshold());
+      if (!res) {
+        if (heard.length >= 10) say('Still listening. Keep reciting, or check the microphone is close.');
+        return;
+      }
+      if (res.found) { consumeAll(); $('heard').textContent = ''; jumpTo(res.found, true); return; }
+      if (heard.length >= 9) showChoices(res.ambiguous);
+      else say('This passage appears in more than one place. Keep reciting…');
+    }
+
     function processResults(results, from) {
-      const threshold = THRESHOLDS[$('p-strict').value] ?? THRESHOLDS.normal;
+      if (phase === 'locating') { locating(results); return; }
+      if (phase !== 'tracking') return;
       for (let r = from; r < results.length; r++) {
         const res = results[r];
-        const spoken = normalize(res[0].transcript).split(' ').filter(Boolean);
+        const spoken = wordsOf(res);
         let i = used[r] ?? 0;
-        while (i < spoken.length && pos < flat.length) {
-          const m = matchAt(spoken, i, flat, pos, threshold);
-          if (m.n) { i += m.n; used[r] = i; accept(m.e, false); continue; }
+        while (i < spoken.length && pos < flat.length && phase === 'tracking') {
+          let m = matchAt(spoken, i, flat, pos, threshold());
+          // When following, the Bismillah is optional: if the reader goes straight into ayah 1, skip it.
+          if (!m.n && mode === 'follow' && flat[pos].item.a === 0 && flat[pos].wi === 0) {
+            const bItem = flat[pos].item;
+            const after = pos + bItem.words.length;
+            if (flat[after] && matchAt(spoken, i, flat, after, threshold()).n) {
+              bItem.words.forEach((x) => { x.state = 'skipped'; if (x.el) x.el.className = 'w out'; });
+              pos = after;
+              m = matchAt(spoken, i, flat, pos, threshold());
+            }
+          }
+          if (m.n) {
+            if (res.isFinal) recent.push(...spoken.slice(i, i + m.n));
+            i += m.n; used[r] = i; accept(m.e, false); continue;
+          }
           if (!res.isFinal) break;   // interim text may still change; judge it once it is final
-          reject(spoken[i]);
+          recent.push(spoken[i]);
+          if (recent.length > 16) recent = recent.slice(-16);
           i++; used[r] = i;
+          if (reject(spoken[i - 1])) return;
         }
       }
     }
+
     function startListening() {
-      if (!SR || pos >= flat.length) return;
+      if (!SR || phase === 'done') return;
       rec = new SR();
       rec.lang = 'ar-SA';
       rec.continuous = true;
@@ -565,8 +678,10 @@ const meta = getMeta();
         if (listening) { used = {}; rec.__lastResults = null; try { rec.start(); } catch {} }
         else setMic(false);
       };
-      try { rec.start(); listening = true; setMic(true); say('Listening. Recite the next word.'); }
-      catch { say('Could not start the microphone. Reload the page and try again.', 'bad'); }
+      try {
+        rec.start(); listening = true; setMic(true);
+        say(phase === 'locating' ? 'Listening. Recite from any ayah.' : 'Listening. Recite the next word.');
+      } catch { say('Could not start the microphone. Reload the page and try again.', 'bad'); }
     }
     function stopListening() {
       listening = false;

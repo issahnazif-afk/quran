@@ -14,6 +14,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import cfg from '../site.config.mjs';
+import { tokenize } from '../src/lib/recite.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'public', 'data');
@@ -231,6 +232,7 @@ async function main() {
 
   const search = [];
   const fullArabic = [];
+  const reciteIndex = []; // plain words per ayah, used to find where a reader is reciting
   for (const s of tanzil) {
     const info = surahIndex[s.n - 1];
     const ayahs = s.ayahs.map((x, i) => {
@@ -238,6 +240,7 @@ async function main() {
       const tr = {};
       for (const t of cfg.translations) tr[t.id] = trs[t.id].bySurah[s.n][i];
       search.push([s.n, x.a, plainArabic(x.ar), tr[cfg.defaultTranslation]]);
+      reciteIndex.push([s.n, x.a, tokenize(x.ar, k).map((w) => w.plain).join(' ')]);
       fullArabic.push({ s: s.n, a: x.a, text: x.ar });
       return { a: x.a, ar: x.ar, juz: juzPage[k].juz, page: juzPage[k].page, sajda: sajdas.has(k) || undefined, tr };
     });
@@ -246,6 +249,7 @@ async function main() {
     if (wbw) await writeJson(`wbw/${pad(s.n)}.json`, wbw[s.n]);
   }
   await writeJson('search.json', search);
+  await writeJson('recite-index.json', reciteIndex);
 
   // Whole-dataset downloads for the Resources page
   await writeJson('download/quran-uthmani.json', { _copyright: TANZIL_NOTICE, ayahs: fullArabic });
