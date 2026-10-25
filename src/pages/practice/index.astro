@@ -57,6 +57,7 @@ const meta = getMeta();
     .practice .w.weak { color: var(--bad); box-shadow: inset 0 -2px 0 rgba(179, 38, 30, .35); }
     .practice .w.missed { box-shadow: inset 0 -3px 0 var(--bad) !important; background: rgba(179, 38, 30, .12); }
     .practice .w.helped { color: var(--marker); }
+    .practice .w.unclear { background-image: radial-gradient(circle, var(--muted) 1px, transparent 1.6px); background-size: 6px 4px; background-repeat: repeat-x; background-position: 0 100%; }
     .practice .w.fresh { color: var(--good); transition: none; }
     .practice .w.replay { background: linear-gradient(transparent 24%, var(--replay) 24%, var(--replay) 84%, transparent 84%); }
     .practice .w.hint { color: var(--muted); -webkit-mask-image: linear-gradient(to left, #000 26%, transparent 34%); mask-image: linear-gradient(to left, #000 26%, transparent 34%); }
@@ -175,6 +176,7 @@ const meta = getMeta();
       <span><b style="color:var(--good)">Green</b> as you read it right</span>
       <span><b style="color:var(--bad)">Red</b> took more than one try</span>
       <span><b style="color:var(--marker)">Amber</b> shown as help</span>
+      <span><b>Dotted</b> not heard clearly; worth checking</span>
       <span><b style="background:var(--replay);padding:0 4px;border-radius:3px;color:var(--ink)">Highlight</b> words you went back over</span>
     </div>
 
@@ -198,7 +200,7 @@ const meta = getMeta();
       </div>
       <div class="tool-row">
         <button class="btn btn-primary" type="button" id="again">Practise again</button>
-        <a class="btn" id="read-link" href="#">Read these ayahs</a>
+        <a class="btn" id="read-link" href="#">Listen to these ayahs</a>
       </div>
     </section>
   </div>
@@ -207,6 +209,7 @@ const meta = getMeta();
     import cfg from '../../../site.config.mjs';
     import { getJson, pad, settings, store, audioUrl } from '../../lib/client.mjs';
     import { tokenize, normalize, matchAt, THRESHOLDS, buildLocator, locate } from '../../lib/recite.mjs';
+    import { createFollower } from '../../lib/follow.mjs';
     import { u } from '../../lib/url.mjs';
 
     const $ = (id) => document.getElementById(id);
@@ -296,7 +299,7 @@ const meta = getMeta();
     }
 
     function resetSession() {
-      items = []; flat = []; pos = 0; wrongStreak = 0; back = null;
+      items = []; flat = []; pos = 0; wrongStreak = 0; follower.clearBack();
       stats = { words: 0, first: 0, help: 0 };
       queue.length = 0; running = false;
       $('choices').hidden = true; $('heard').textContent = '';
@@ -365,7 +368,7 @@ const meta = getMeta();
       phase = 'jumping';
       const [s, a, wi] = locator.R[found.start];
       const lastRef = locator.R[found.last];
-      queue.length = 0; back = null;
+      queue.length = 0; follower.clearBack();
       const { out } = await surahItems(s, a, Infinity, false);
       items = out; flat = items.flatMap((it) => it.words);
       lastSurah = s;
@@ -426,7 +429,7 @@ const meta = getMeta();
       const wordSpan = (w) => {
         const cls = w.state === 'shown' ? 'w' : w.state === 'skipped' ? 'w out' : 'w hidden';
         const sp = el('span', cls, w.display);
-        if (w.state === 'shown') { if (w.helped) sp.classList.add('helped'); else if (w.mistake) sp.classList.add('weak'); }
+        if (w.state === 'shown') { if (w.helped) sp.classList.add('helped'); else if (w.mistake) sp.classList.add('weak'); else if (w.unclear) sp.classList.add('unclear'); }
         else if (w.mistake) sp.classList.add('missed');
         if (w.hint && w.state === 'hidden') sp.classList.add('hint');
         w.el = sp;
@@ -503,6 +506,7 @@ const meta = getMeta();
         const { dur, gap } = reduceMotion ? { dur: 1, gap: 0 } : timing(w);
         sp.classList.remove('hidden', 'hint', 'current', 'wrong', 'missed');
         sp.classList.add(w.helped ? 'helped' : w.mistake ? 'weak' : 'fresh');
+        if (w.unclear && !w.mistake && !w.helped) sp.classList.add('unclear');
         sp.style.setProperty('--dur', `${dur}ms`);
         sp.classList.add('ink');
         follow(sp);
@@ -571,13 +575,6 @@ const meta = getMeta();
     }
 
     // Did another of the speech engine's guesses hear the right word?
-    function altHeard(res, i, th) {
-      for (let k = 1; k < res.length; k++) {
-        const alt = normalize(res[k].transcript).split(' ').filter(Boolean);
-        for (const j of [i, i - 1, i + 1]) if (alt[j] && matchAt(alt, j, flat, pos, th).n) return true;
-      }
-      return false;
-    }
 
     function updateCurrent() {
       document.querySelectorAll('.practice .w.current').forEach((x) => x.classList.remove('current'));
@@ -595,11 +592,15 @@ const meta = getMeta();
       st.className = 'status' + (kind ? ' ' + kind : '');
     }
 
-    function accept(count, helped, quiet) {
+    // kind: false (read correctly) | true (shown with "Show next word") | 'unclear' (the speech engine did not catch it)
+    function accept(count, kind, quiet) {
+      const helped = kind === true;
+      const strict = $('p-strict').value === 'strict';
       for (let k = 0; k < count && pos < flat.length; k++) {
         const w = flat[pos];
         w.state = 'queued';
         if (helped) { w.helped = true; stats.help++; }
+        else if (kind === 'unclear') { w.unclear = true; if (strict) w.mistake = true; else if (!w.mistake) stats.first++; }
         else if (!w.mistake) stats.first++;
         stats.words++;
         pos++;
@@ -631,27 +632,12 @@ const meta = getMeta();
     // ── going back over words ──────────────────────────────────
     // If the reader repeats the last 1 to 3 words, highlight them as they are re-read,
     // then carry on from where they had reached.
-    let back = null;   // index in flat of the next word expected while going back
     function markReplay(idx) {
       const w = flat[idx];
       if (w?.el && w.page === shownPage) w.el.classList.add('replay');
     }
     function endReplay() {
-      back = null;
       setTimeout(() => document.querySelectorAll('.practice .w.replay').forEach((x) => x.classList.remove('replay')), 900);
-    }
-    function findBacktrack(spoken, i, th) {
-      // A reciter may step back a few words, or to the start of the ayah, as in normal recitation.
-      let near = null;
-      for (let k = 1; k <= 12 && pos - k >= 0; k++) {
-        const idx = pos - k;
-        if (flat[idx].state === 'skipped') break;
-        if (!matchAt(spoken, i, flat, idx, th).n) continue;
-        const follows = spoken[i + 1] && idx + 1 < pos && matchAt(spoken, i + 1, flat, idx + 1, th).n;
-        if (follows) return idx;
-        if (k <= 3) near ??= idx;   // a single matching word is only trusted for a short step back
-      }
-      return near;
     }
 
     function finishAll() {
@@ -696,24 +682,21 @@ const meta = getMeta();
       target.done = false;
       pos = flat.indexOf(target.words.find((x) => x.state !== 'skipped') ?? target.words[0]);
       consumeAll();
-      back = null;
+      follower.clearBack();
       await renderPage(target.page, false);
       updateCurrent();
       say('Ayah cleared. Recite it again from the start.');
     });
 
     // ── listening ──────────────────────────────────────────────
-    let rec = null, listening = false, used = {}, lastLocate = 0;
+    let rec = null, listening = false, lastLocate = 0;
     const wordsOf = (res) => normalize(res[0].transcript).split(' ').filter(Boolean);
-    function consumeAll() {
-      const r = rec?.__lastResults;
-      if (r) for (let k = 0; k < r.length; k++) used[k] = wordsOf(r[k]).length;
-    }
+    function consumeAll() { follower.consumeAll(rec?.__lastResults); }
 
     function locating(results) {
       // Gather the words heard since following started (newest last).
       const heard = [];
-      for (let r = 0; r < results.length; r++) heard.push(...wordsOf(results[r]).slice(used[r] ?? 0));
+      for (let r = 0; r < results.length; r++) heard.push(...wordsOf(results[r]).slice(follower.offset(r)));
       $('heard').textContent = heard.slice(-8).join(' ');
       const isFinal = results[results.length - 1]?.isFinal;
       const now = Date.now();
@@ -731,63 +714,30 @@ const meta = getMeta();
       else say('This passage appears in more than one place. Keep reciting…');
     }
 
+    const follower = createFollower({
+      getFlat: () => flat,
+      getPos: () => pos,
+      threshold,
+      accept: (n, kind) => accept(n, kind === 'unclear' ? 'unclear' : false),
+      wrong: (heard) => reject(heard),
+      replay: (idx) => { markReplay(idx); say('Going back over it…', 'good'); },
+      endReplay,
+      // When following, the Bismillah is optional: if the reader goes straight into ayah 1, skip it.
+      skipOptional: (spoken, i, th) => {
+        const w = flat[pos];
+        if (mode !== 'follow' || !w || w.item.a !== 0 || w.wi !== 0) return null;
+        const after = pos + w.item.words.length;
+        if (!flat[after] || !matchAt(spoken, i, flat, after, th).n) return null;
+        w.item.words.forEach((x) => { x.state = 'skipped'; if (x.el) x.el.className = 'w out'; });
+        pos = after;
+        return pos;
+      },
+    });
+
     function processResults(results, from) {
       if (phase === 'locating') { locating(results); return; }
       if (phase !== 'tracking') return;
-      const th = threshold();
-      for (let r = from; r < results.length; r++) {
-        const res = results[r];
-        const spoken = wordsOf(res);
-        let i = used[r] ?? 0;
-        while (i < spoken.length && pos < flat.length && phase === 'tracking') {
-          // 1. going back over words already written
-          if (back !== null) {
-            const mb = matchAt(spoken, i, flat, back, th);
-            if (mb.n) {
-              for (let k = 0; k < mb.e; k++) markReplay(back + k);
-              back += mb.e; i += mb.n; used[r] = i;
-              say('Going back over it…', 'good');
-              if (back >= pos) endReplay();
-              continue;
-            }
-          }
-          // 2. the next word
-          let m = matchAt(spoken, i, flat, pos, th);
-          // When following, the Bismillah is optional: if the reader goes straight into ayah 1, skip it.
-          if (!m.n && mode === 'follow' && flat[pos].item.a === 0 && flat[pos].wi === 0) {
-            const bItem = flat[pos].item;
-            const after = pos + bItem.words.length;
-            if (flat[after] && matchAt(spoken, i, flat, after, th).n) {
-              bItem.words.forEach((x) => { x.state = 'skipped'; if (x.el) x.el.className = 'w out'; });
-              pos = after;
-              m = matchAt(spoken, i, flat, pos, th);
-            }
-          }
-          if (m.n) {
-            if (back !== null) endReplay();
-            i += m.n; used[r] = i; accept(m.e, false); continue;
-          }
-          // 3. starting to go back 1 to 3 words
-          const bt = findBacktrack(spoken, i, th);
-          if (bt !== null) {
-            back = bt;
-            const mb = matchAt(spoken, i, flat, back, th);
-            for (let k = 0; k < mb.e; k++) markReplay(back + k);
-            back += mb.e; i += mb.n; used[r] = i;
-            say('Going back over it…', 'good');
-            if (back >= pos) endReplay();
-            continue;
-          }
-          // 4. another of the engine's guesses heard the right word
-          if (altHeard(res, i, th)) { if (back !== null) endReplay(); i++; used[r] = i; accept(1, false); continue; }
-          // 5. an extra word from the speech engine, followed by the right word: ignore it
-          if (spoken[i + 1] && matchAt(spoken, i + 1, flat, pos, th).n) { i++; used[r] = i; continue; }
-          // 5. interim text may still change; judge it once it is final
-          if (!res.isFinal) break;
-          i++; used[r] = i;
-          reject(spoken[i - 1]);
-        }
-      }
+      follower.handle(results, from);
     }
 
     function startListening() {
@@ -797,7 +747,7 @@ const meta = getMeta();
       rec.continuous = true;
       rec.interimResults = true;
       rec.maxAlternatives = 3;
-      used = {};
+      follower.reset();
       rec.onresult = (e) => { rec.__lastResults = e.results; processResults(e.results, e.resultIndex); };
       rec.onerror = (e) => {
         if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
@@ -808,7 +758,7 @@ const meta = getMeta();
         }
       };
       rec.onend = () => {
-        if (listening) { used = {}; rec.__lastResults = null; try { rec.start(); } catch {} }
+        if (listening) { follower.reset(); rec.__lastResults = null; try { rec.start(); } catch {} }
         else setMic(false);
       };
       try {

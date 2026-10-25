@@ -7,7 +7,7 @@ interface Props { title?: string; description?: string; active?: string; }
 const { title, description = 'Read, listen to and study the Quran from open, authentic sources.', active = '' } = Astro.props;
 const fullTitle = title ? `${title} | ${cfg.appName}` : cfg.appName;
 const nav = [
-  ['read', 'Read', 'surah/1/'],
+  ['read', 'Listen', 'surah/1/'],
   ['mushaf', 'Mushaf', 'page/1/'],
   ['practice', 'Recite', 'practice/'],
   ['test', 'Hifz test', 'test/'],

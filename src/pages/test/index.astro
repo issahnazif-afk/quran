@@ -59,6 +59,7 @@ const meta = getMeta();
     .practice .w.weak { color: var(--bad); box-shadow: inset 0 -2px 0 rgba(179, 38, 30, .35); }
     .practice .w.missed { box-shadow: inset 0 -3px 0 var(--bad) !important; background: rgba(179, 38, 30, .12); }
     .practice .w.helped { color: var(--marker); }
+    .practice .w.unclear { background-image: radial-gradient(circle, var(--muted) 1px, transparent 1.6px); background-size: 6px 4px; background-repeat: repeat-x; background-position: 0 100%; }
     .practice .w.fresh { color: var(--good); transition: none; }
     .practice .w.replay { background: linear-gradient(transparent 24%, var(--replay) 24%, var(--replay) 84%, transparent 84%); }
     .practice .w.hint { color: var(--muted); -webkit-mask-image: linear-gradient(to left, #000 26%, transparent 34%); mask-image: linear-gradient(to left, #000 26%, transparent 34%); }
@@ -251,6 +252,7 @@ const meta = getMeta();
           <span><b style="color:var(--good)">Green</b> as you read it right</span>
           <span><b style="color:var(--bad)">Red</b> took more than one try, or the Sheikh prompted you</span>
           <span><b style="color:var(--marker)">Amber</b> shown as help</span>
+      <span><b>Dotted</b> not heard clearly; worth checking</span>
           <span><b style="background:var(--replay);padding:0 4px;border-radius:3px;color:var(--ink)">Highlight</b> words you went back over</span>
         </div>
         <p class="note">Your browser turns speech into text using its own speech service (Google in Chrome and Edge, Apple in Safari). This site does not record or store audio.</p>
@@ -281,6 +283,7 @@ const meta = getMeta();
     import cfg from '../../../site.config.mjs';
     import { getJson, pad, settings, store, audioUrl } from '../../lib/client.mjs';
     import { tokenize, normalize, matchAt, THRESHOLDS } from '../../lib/recite.mjs';
+    import { createFollower } from '../../lib/follow.mjs';
     import { u } from '../../lib/url.mjs';
 
     const $ = (id) => document.getElementById(id);
@@ -300,7 +303,7 @@ const meta = getMeta();
     let questions = [];    // [{ start: index in scopeAyahs, items, flat, stats }]
     let qi = -1;
     let phase = 'idle';    // idle | sheikh | answer | stopped | done
-    let items = [], flat = [], pos = 0, shownPage = 0, back = null, wrongStreak = 0;
+    let items = [], flat = [], pos = 0, shownPage = 0, wrongStreak = 0;
     let q = null;
 
     // ── setup ──────────────────────────────────────────────────
@@ -438,7 +441,7 @@ const meta = getMeta();
       q.stats = { words: 0, first: 0, prompts: 0, help: 0, skipped: false };
       items = q.items; flat = items.flatMap((it) => it.words);
       q.flat = flat;
-      pos = 0; back = null; wrongStreak = 0; queue.length = 0;
+      pos = 0; wrongStreak = 0; queue.length = 0; follower.clearBack();
       renderDots();
       $('next').hidden = true;
       ['repeat', 'help', 'skip'].forEach((id) => ($(id).disabled = false));
@@ -586,7 +589,7 @@ const meta = getMeta();
       const wordSpan = (w) => {
         const cls = w.state === 'shown' ? 'w' : w.state === 'skipped' ? 'w out' : 'w hidden';
         const sp = el('span', cls, w.display);
-        if (w.state === 'shown') { if (w.helped) sp.classList.add('helped'); else if (w.mistake) sp.classList.add('weak'); }
+        if (w.state === 'shown') { if (w.helped) sp.classList.add('helped'); else if (w.mistake) sp.classList.add('weak'); else if (w.unclear) sp.classList.add('unclear'); }
         else if (w.mistake) sp.classList.add('missed');
         w.el = sp;
         return sp;
@@ -653,6 +656,7 @@ const meta = getMeta();
         const { dur, gap } = reduceMotion ? { dur: 1, gap: 0 } : timing(w);
         sp.classList.remove('hidden', 'hint', 'current', 'wrong', 'missed');
         sp.classList.add(w.helped ? 'helped' : w.mistake ? 'weak' : 'fresh');
+        if (w.unclear && !w.mistake && !w.helped) sp.classList.add('unclear');
         sp.style.setProperty('--dur', `${dur}ms`);
         sp.classList.add('ink');
         follow(sp);
@@ -706,13 +710,6 @@ const meta = getMeta();
     }
 
     // Did another of the speech engine's guesses hear the right word?
-    function altHeard(res, i, th) {
-      for (let k = 1; k < res.length; k++) {
-        const alt = normalize(res[k].transcript).split(' ').filter(Boolean);
-        for (const j of [i, i - 1, i + 1]) if (alt[j] && matchAt(alt, j, flat, pos, th).n) return true;
-      }
-      return false;
-    }
 
     function updateCurrent() {
       document.querySelectorAll('.hifz .w.current').forEach((x) => x.classList.remove('current'));
@@ -729,6 +726,7 @@ const meta = getMeta();
         w.state = 'queued';
         if (kind === 'help') { w.helped = true; q.stats.help++; }
         else if (kind === 'prompt') { w.mistake = true; }
+        else if (kind === 'unclear') { w.unclear = true; if ($('t-strict').value === 'strict') w.mistake = true; else if (!w.mistake) q.stats.first++; }
         else if (!w.mistake) q.stats.first++;
         q.stats.words++;
         pos++;
@@ -736,7 +734,7 @@ const meta = getMeta();
       }
       wrongStreak = 0;
       if (kind !== 'prompt') status(kind === 'help' ? 'Shown. Carry on.' : 'Correct. Keep going.', 'good');
-      if (!kind && phase === 'answer' && $('sheikh').dataset.state === 'listening') sheikh('listening', 'تفضّل', 'Carry on.');
+      if ((!kind || kind === 'unclear') && phase === 'answer' && $('sheikh').dataset.state === 'listening') sheikh('listening', 'تفضّل', 'Carry on.');
       updateCurrent();
       armSilence();
     }
@@ -869,69 +867,34 @@ const meta = getMeta();
     $('change').addEventListener('click', () => { $('results').hidden = true; $('setup').hidden = false; $('intro').hidden = false; });
 
     // ── listening ──────────────────────────────────────────────
-    let rec = null, listening = false, used = {};
+    let rec = null, listening = false;
     const wordsOf = (res) => normalize(res[0].transcript).split(' ').filter(Boolean);
     function markReplay(idx) { const w = flat[idx]; if (w?.el && w.page === shownPage) w.el.classList.add('replay'); }
-    function endReplay() { back = null; setTimeout(() => document.querySelectorAll('.hifz .w.replay').forEach((x) => x.classList.remove('replay')), 900); }
-    function findBacktrack(spoken, i, th) {
-      // A reciter may step back a few words, or to the start of the ayah, as in normal recitation.
-      let near = null;
-      for (let k = 1; k <= 12 && pos - k >= 0; k++) {
-        const idx = pos - k;
-        if (flat[idx].state === 'skipped') break;
-        if (!matchAt(spoken, i, flat, idx, th).n) continue;
-        const follows = spoken[i + 1] && idx + 1 < pos && matchAt(spoken, i + 1, flat, idx + 1, th).n;
-        if (follows) return idx;
-        if (k <= 3) near ??= idx;   // a single matching word is only trusted for a short step back
-      }
-      return near;
-    }
+    function endReplay() { setTimeout(() => document.querySelectorAll('.hifz .w.replay').forEach((x) => x.classList.remove('replay')), 900); }
+    const follower = createFollower({
+      getFlat: () => flat,
+      getPos: () => pos,
+      threshold,
+      accept: (n, kind) => accept(n, kind),
+      wrong: (heard) => reject(heard),
+      replay: (idx) => { markReplay(idx); status('Going back over it…', 'good'); },
+      endReplay,
+      // the Bismillah between surahs is optional
+      skipOptional: (spoken, i, th) => {
+        const w = flat[pos];
+        if (!w || w.item.a !== 0 || w.wi !== 0) return null;
+        const after = pos + w.item.words.length;
+        if (!flat[after] || !matchAt(spoken, i, flat, after, th).n) return null;
+        w.item.words.forEach((x) => { x.state = 'skipped'; if (x.el) x.el.className = 'w out'; });
+        pos = after;
+        return pos;
+      },
+    });
+
     function processResults(results, from) {
       if (phase !== 'answer') return;
       armSilence();
-      const th = threshold();
-      for (let r = from; r < results.length; r++) {
-        const res = results[r];
-        const spoken = wordsOf(res);
-        let i = used[r] ?? 0;
-        while (i < spoken.length && pos < flat.length && phase === 'answer') {
-          if (back !== null) {
-            const mb = matchAt(spoken, i, flat, back, th);
-            if (mb.n) {
-              for (let k = 0; k < mb.e; k++) markReplay(back + k);
-              back += mb.e; i += mb.n; used[r] = i;
-              status('Going back over it…', 'good');
-              if (back >= pos) endReplay();
-              continue;
-            }
-          }
-          let m = matchAt(spoken, i, flat, pos, th);
-          if (!m.n && flat[pos].item.a === 0 && flat[pos].wi === 0) {   // the Bismillah is optional
-            const after = pos + flat[pos].item.words.length;
-            if (flat[after] && matchAt(spoken, i, flat, after, th).n) {
-              flat[pos].item.words.forEach((x) => { x.state = 'skipped'; if (x.el) x.el.className = 'w out'; });
-              pos = after;
-              m = matchAt(spoken, i, flat, pos, th);
-            }
-          }
-          if (m.n) { if (back !== null) endReplay(); i += m.n; used[r] = i; accept(m.e); continue; }
-          const bt = findBacktrack(spoken, i, th);
-          if (bt !== null) {
-            back = bt;
-            const mb = matchAt(spoken, i, flat, back, th);
-            for (let k = 0; k < mb.e; k++) markReplay(back + k);
-            back += mb.e; i += mb.n; used[r] = i;
-            status('Going back over it…', 'good');
-            if (back >= pos) endReplay();
-            continue;
-          }
-          if (altHeard(res, i, th)) { if (back !== null) endReplay(); i++; used[r] = i; accept(1); continue; }
-          if (spoken[i + 1] && matchAt(spoken, i + 1, flat, pos, th).n) { i++; used[r] = i; continue; }
-          if (!res.isFinal) break;
-          i++; used[r] = i;
-          reject(spoken[i - 1]);
-        }
-      }
+      follower.handle(results, from);
     }
     function startListening() {
       if (!SR || listening) return;
@@ -940,7 +903,7 @@ const meta = getMeta();
       rec.continuous = true;
       rec.interimResults = true;
       rec.maxAlternatives = 3;
-      used = {};
+      follower.reset();
       const me = rec;
       rec.onresult = (e) => { if (me === rec) processResults(e.results, e.resultIndex); };
       rec.onerror = (e) => {
@@ -951,7 +914,7 @@ const meta = getMeta();
           status('The speech service could not be reached. Check your internet connection.', 'bad');
         }
       };
-      rec.onend = () => { if (listening && me === rec) { used = {}; try { rec.start(); } catch {} } };
+      rec.onend = () => { if (listening && me === rec) { follower.reset(); try { rec.start(); } catch {} } };
       try { rec.start(); listening = true; } catch { status('Could not start the microphone. Reload the page and try again.', 'bad'); }
     }
     function stopListening() {

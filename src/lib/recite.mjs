@@ -74,9 +74,17 @@ function prefixDiffers(a, b) {
   return a.length === b.length && a[0] !== b[0] && (PREFIXES.includes(a[0]) || PREFIXES.includes(b[0])) && a.slice(1) === b.slice(1);
 }
 
+// The consonant outline of a word: long vowels and hamza seats removed after the first letter.
+// Speech engines and the Uthmani script often differ only in these (الصلاة / الصلوة, ءامنوا / آمنوا).
+const skeleton = (w) => w[0] + w.slice(1).replace(/[اويء]/g, '');
+
 export function wordMatches(said, target, threshold) {
   if (said === target) return true;
   if (prefixDiffers(said, target)) return false;
+  if (threshold < THRESHOLDS.strict) {
+    const a = skeleton(said), b = skeleton(target);
+    if (a === b && a.length >= 2) return true;
+  }
   // Very short words must be exact unless the reader chose "lenient".
   if (target.length <= 3 && threshold > THRESHOLDS.lenient) return false;
   return similarity(said, target) >= threshold;
@@ -99,7 +107,7 @@ export function matchAt(spoken, i, words, next, threshold) {
   return { n: 0, e: 0 };
 }
 
-export const THRESHOLDS = { strict: 0.85, normal: 0.7, lenient: 0.55 };
+export const THRESHOLDS = { strict: 0.8, normal: 0.62, lenient: 0.5 };
 
 // ── Finding where the reader is ─────────────────────────────────
 // rows: [[surah, ayah, "w1 w2 …"], …] using the same plain words as tokenize().
