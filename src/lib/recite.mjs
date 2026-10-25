@@ -93,7 +93,7 @@ export function matchAt(spoken, i, words, next, threshold) {
     if (w.targets.some((t) => wordMatches(said, t, threshold))) return { n, e: 1 };
   }
   const w2 = words[next + 1];
-  if (w2 && !w.initials && !w2.initials && spoken[i]) {
+  if (w2 && w2.item === w.item && !w.initials && !w2.initials && spoken[i]) {
     if (wordMatches(spoken[i], w.plain + w2.plain, threshold)) return { n: 1, e: 2 };
   }
   return { n: 0, e: 0 };
