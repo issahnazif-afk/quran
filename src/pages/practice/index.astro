@@ -46,20 +46,31 @@ const meta = getMeta();
     .practice .folio { margin-top: auto; text-align: center; font-family: var(--font-ar-ui); color: var(--paper-ink); }
 
     /* words: hidden → hint → ink flowing in from the right → shown */
-    .practice .w { display: inline-block; padding: 0 .08em; margin: 0 -.08em; border-radius: 3px; color: var(--ink); }
+    .practice { --good: #13804F; --bad: #B3261E; --replay: rgba(19, 128, 79, .22); }
+    :root[data-theme="dark"] .practice { --good: #5BD39A; --bad: #FF8A80; --replay: rgba(91, 211, 154, .25); }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .practice { --good: #5BD39A; --bad: #FF8A80; --replay: rgba(91, 211, 154, .25); } }
+    .practice .w { display: inline-block; padding: 0 .08em; margin: 0 -.08em; border-radius: 3px; color: var(--ink); transition: color .8s ease, background-color .6s ease; }
     .practice .w.hidden { color: transparent; }
     .practice .paper.outlines .w.hidden { box-shadow: inset 0 -1px 0 var(--paper-line); }
     .practice .w.current { box-shadow: inset 0 -2px 0 var(--accent) !important; }
-    .practice .w.current.wrong { box-shadow: inset 0 -3px 0 #B3261E !important; }
+    .practice .w.current.wrong { box-shadow: inset 0 -3px 0 var(--bad) !important; background: rgba(179, 38, 30, .12); }
+    .practice .w.weak { color: var(--bad); }
+    .practice .w.helped { color: var(--marker); }
+    .practice .w.fresh { color: var(--good); transition: none; }
+    .practice .w.replay { background: linear-gradient(transparent 24%, var(--replay) 24%, var(--replay) 84%, transparent 84%); }
     .practice .w.hint { color: var(--muted); -webkit-mask-image: linear-gradient(to left, #000 26%, transparent 34%); mask-image: linear-gradient(to left, #000 26%, transparent 34%); }
     .practice .w.ink {
-      color: var(--ink);
       -webkit-mask-image: linear-gradient(to left, #000 calc(var(--ink) - 14%), transparent calc(var(--ink) + 6%));
       mask-image: linear-gradient(to left, #000 calc(var(--ink) - 14%), transparent calc(var(--ink) + 6%));
       animation: ql-ink var(--dur, 400ms) linear forwards;
     }
     @keyframes ql-ink { from { --ink: -8%; } to { --ink: 114%; } }
-    .practice .w.helped { color: var(--marker); }
+    .practice .legend { max-width: 660px; margin: 0 auto; display: flex; flex-wrap: wrap; gap: 6px 18px; justify-content: center; font-size: 13px; color: var(--muted); }
+    .practice .legend b { font-weight: 600; }
+    .practice .worklist { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 560px; }
+    .practice .worklist a { text-decoration: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; display: flex; flex-direction: column; align-items: center; color: var(--ink); }
+    .practice .worklist .ar { font-family: var(--font-quran); font-size: 22px; color: var(--bad); line-height: 1.8; }
+    .practice .worklist small { color: var(--muted); }
     .practice .out { color: transparent; }
     .practice .paper.context .out { color: var(--muted); opacity: .35; }
     .practice .mk { color: var(--marker); }
@@ -157,6 +168,12 @@ const meta = getMeta();
     </div>
 
     <div class="stage" id="stage" hidden></div>
+    <div class="legend" id="legend" hidden>
+      <span><b style="color:var(--good)">Green</b> as you read it right</span>
+      <span><b style="color:var(--bad)">Red</b> took more than one try</span>
+      <span><b style="color:var(--marker)">Amber</b> shown as help</span>
+      <span><b style="background:var(--replay);padding:0 4px;border-radius:3px;color:var(--ink)">Highlight</b> words you went back over</span>
+    </div>
 
     <section class="card tr-panel" id="tr-panel" hidden aria-live="polite">
       <b id="tr-key" style="font-size:14px;color:var(--accent-strong)"></b>
@@ -172,6 +189,10 @@ const meta = getMeta();
         <div><dd id="sum-first">0%</dd><dt>right first time</dt></div>
         <div><dd id="sum-help">0</dd><dt>words shown as help</dt></div>
       </dl>
+      <div id="work" hidden style="display:flex;flex-direction:column;gap:8px;align-items:center">
+        <b>Words to work on</b>
+        <div class="worklist" id="worklist"></div>
+      </div>
       <div class="tool-row">
         <button class="btn btn-primary" type="button" id="again">Practise again</button>
         <a class="btn" id="read-link" href="#">Read these ayahs</a>
@@ -272,7 +293,7 @@ const meta = getMeta();
     }
 
     function resetSession() {
-      items = []; flat = []; pos = 0; wrongStreak = 0;
+      items = []; flat = []; pos = 0; wrongStreak = 0; back = null;
       stats = { words: 0, first: 0, help: 0 };
       queue.length = 0; running = false;
       $('choices').hidden = true; $('heard').textContent = '';
@@ -282,7 +303,7 @@ const meta = getMeta();
       $('summary-text').textContent = `${summary}, ${$('p-strict').selectedOptions[0].textContent.toLowerCase()} checking`;
       $('setup').hidden = true; $('intro').hidden = true;
       $('summary-bar').hidden = false;
-      $('toolbar').hidden = false; $('stage').hidden = false; $('note').hidden = false;
+      $('toolbar').hidden = false; $('stage').hidden = false; $('note').hidden = false; $('legend').hidden = false;
       $('finish').hidden = mode !== 'follow';
       document.querySelector('.practice .progress').hidden = mode === 'follow';
     }
@@ -341,7 +362,7 @@ const meta = getMeta();
       phase = 'jumping';
       const [s, a, wi] = locator.R[found.start];
       const lastRef = locator.R[found.last];
-      queue.length = 0;
+      queue.length = 0; back = null;
       const { out } = await surahItems(s, a, Infinity, false);
       items = out; flat = items.flatMap((it) => it.words);
       lastSurah = s;
@@ -402,7 +423,7 @@ const meta = getMeta();
       const wordSpan = (w) => {
         const cls = w.state === 'shown' ? 'w' : w.state === 'skipped' ? 'w out' : 'w hidden';
         const sp = el('span', cls, w.display);
-        if (w.helped) sp.classList.add('helped');
+        if (w.state === 'shown') { if (w.helped) sp.classList.add('helped'); else if (w.mistake) sp.classList.add('weak'); }
         if (w.hint && w.state === 'hidden') sp.classList.add('hint');
         w.el = sp;
         return sp;
@@ -440,7 +461,9 @@ const meta = getMeta();
       shownPage = p;
     }
 
-    // ── reveal queue: words are written one after another ──────
+    // ── writing words onto the page ────────────────────────────
+    // Each word starts a moment after the previous one and the animations overlap,
+    // so the page keeps pace with the reader instead of queuing up behind them.
     const queue = [];
     let running = false;
     function enqueue(fn) { queue.push(fn); if (!running) drain(); }
@@ -452,46 +475,57 @@ const meta = getMeta();
       if (phase === 'tracking' && pos >= flat.length && flat.length && !(mode === 'follow' && lastSurah < 114)) finishAll();
     }
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-    function inkDuration(w) {
+    let lastInkEnd = 0;
+    function timing(w) {
+      const letters = Math.max(1, w.plain.length);
       const backlog = queue.length;
-      const perLetter = backlog > 4 ? 35 : backlog > 1 ? 55 : 80;   // catch up when speech runs ahead
-      return Math.min(900, Math.max(240, Math.max(1, w.plain.length) * perLetter));
+      const dur = backlog > 2 ? 160 : Math.min(340, Math.max(180, letters * 32));
+      const gap = backlog > 2 ? 30 : Math.min(140, Math.max(60, letters * 16));
+      return { dur, gap };
+    }
+    function settle(sp, w) {
+      sp.classList.remove('fresh');
+      if (w.helped) sp.classList.add('helped');
+      else if (w.mistake) sp.classList.add('weak');
     }
     function revealStep(w) {
       return async () => {
         if (w.page !== shownPage) {
-          if (shownPage) await wait(reduceMotion ? 300 : 1000);   // let the reader see the finished page before it turns
+          if (shownPage) await wait(Math.max(0, lastInkEnd - Date.now()) + (reduceMotion ? 150 : 350));
           await renderPage(w.page, true);
-          await wait(reduceMotion ? 0 : 380);
+          await wait(reduceMotion ? 0 : 200);
         }
         const sp = w.el;
         if (!sp) return;
-        const dur = reduceMotion ? 1 : inkDuration(w);
+        const { dur, gap } = reduceMotion ? { dur: 1, gap: 0 } : timing(w);
         sp.classList.remove('hidden', 'hint', 'current', 'wrong');
+        if (!w.helped) sp.classList.add('fresh'); else sp.classList.add('helped');
         sp.style.setProperty('--dur', `${dur}ms`);
         sp.classList.add('ink');
-        if (w.helped) sp.classList.add('helped');
-        await wait(dur * 0.82);   // overlap the next word slightly so the writing flows on
-        setTimeout(() => { sp.classList.remove('ink'); sp.style.removeProperty('--dur'); }, dur * 0.25);
         w.state = 'shown';
+        lastInkEnd = Date.now() + dur;
+        setTimeout(() => { sp.classList.remove('ink'); sp.style.removeProperty('--dur'); }, dur + 20);
+        setTimeout(() => settle(sp, w), dur + 650);   // green first, then black (or red if it took more than one try)
         if (w.wi === w.item.words.length - 1) {
           const it = w.item;
           it.done = true;
-          if (it.mk) {
-            const mk = it.mk;
-            mk.classList.remove('hidden');
-            if (!reduceMotion) {
-              mk.style.setProperty('--dur', '320ms');
-              mk.classList.add('ink');
-              setTimeout(() => { mk.classList.remove('ink'); mk.style.removeProperty('--dur'); }, 360);
+          setTimeout(() => {
+            if (it.mk) {
+              it.mk.classList.remove('hidden');
+              if (!reduceMotion) {
+                it.mk.style.setProperty('--dur', '260ms');
+                it.mk.classList.add('ink');
+                setTimeout(() => { it.mk.classList.remove('ink'); it.mk.style.removeProperty('--dur'); }, 300);
+              }
             }
-          }
-          if ($('p-tr').checked && it.tr) {
-            $('tr-key').textContent = it.label;
-            $('tr-text').textContent = it.tr;
-            $('tr-panel').hidden = false;
-          }
+            if ($('p-tr').checked && it.tr) {
+              $('tr-key').textContent = it.label;
+              $('tr-text').textContent = it.tr;
+              $('tr-panel').hidden = false;
+            }
+          }, dur * 0.6);
         }
+        await wait(gap);
       };
     }
 
@@ -500,7 +534,7 @@ const meta = getMeta();
       $('bar').style.width = mode === 'surah' && flat.length ? `${(pos / flat.length) * 100}%` : '0';
       const w = flat[pos];
       if (!w || phase !== 'tracking') return;
-      if (w.page === shownPage && !running) w.el?.classList.add('current');
+      if (w.page === shownPage) w.el?.classList.add('current');
       const it = w.item;
       $('where').textContent = `${it.label}, word ${w.wi + 1} of ${it.words.length}, page ${w.page}`;
     }
@@ -533,15 +567,41 @@ const meta = getMeta();
 
     function reject(heard) {
       const w = flat[pos];
-      if (!w) return;
+      if (!w) return false;
       w.mistake = true;
       wrongStreak++;
-      if (w.el && !running) {
+      if (w.el) {
         w.el.classList.add('current', 'wrong');
-        setTimeout(() => w.el?.classList.remove('wrong'), 700);
+        setTimeout(() => w.el?.classList.remove('wrong'), 800);
       }
       say(wrongStreak >= 3 ? `Heard “${heard}”. Try the hint if you are stuck.` : `Heard “${heard}”. That is not the next word. Try again.`, 'bad');
       return false;
+    }
+
+    // ── going back over words ──────────────────────────────────
+    // If the reader repeats the last 1 to 3 words, highlight them as they are re-read,
+    // then carry on from where they had reached.
+    let back = null;   // index in flat of the next word expected while going back
+    function markReplay(idx) {
+      const w = flat[idx];
+      if (w?.el && w.page === shownPage) w.el.classList.add('replay');
+    }
+    function endReplay() {
+      back = null;
+      setTimeout(() => document.querySelectorAll('.practice .w.replay').forEach((x) => x.classList.remove('replay')), 900);
+    }
+    function findBacktrack(spoken, i, th) {
+      let best = null;
+      for (let k = 1; k <= 3 && pos - k >= 0; k++) {
+        const idx = pos - k;
+        if (flat[idx].state === 'skipped') break;
+        if (!matchAt(spoken, i, flat, idx, th).n) continue;
+        // prefer a start where the following spoken word also continues the repeat
+        const follows = spoken[i + 1] && idx + 1 < pos && matchAt(spoken, i + 1, flat, idx + 1, th).n;
+        if (follows) return idx;
+        best ??= idx;
+      }
+      return best;
     }
 
     function finishAll() {
@@ -553,6 +613,16 @@ const meta = getMeta();
       $('sum-first').textContent = stats.words ? `${Math.round((stats.first / stats.words) * 100)}%` : '0%';
       $('sum-help').textContent = String(stats.help);
       $('sum-title').textContent = stats.help === 0 && stats.words ? 'Practice complete, with no help' : 'Practice complete';
+      const weak = flat.filter((w) => w.state === 'shown' && (w.mistake || w.helped));
+      const list = $('worklist');
+      list.replaceChildren();
+      for (const w of weak.slice(0, 40)) {
+        const a = el('a');
+        a.href = u(`ayah/?k=${w.item.s}:${w.item.a || 1}`);
+        a.append(el('span', 'ar', w.display), el('small', null, w.item.a ? `${w.item.s}:${w.item.a}` : 'Bismillah'));
+        list.append(a);
+      }
+      $('work').hidden = weak.length === 0;
       setTimeout(() => $('summary').scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' }), 600);
     }
 
@@ -576,6 +646,7 @@ const meta = getMeta();
       target.done = false;
       pos = flat.indexOf(target.words.find((x) => x.state !== 'skipped') ?? target.words[0]);
       consumeAll();
+      back = null;
       await renderPage(target.page, false);
       updateCurrent();
       say('Ayah cleared. Recite it again from the start.');
@@ -613,28 +684,56 @@ const meta = getMeta();
     function processResults(results, from) {
       if (phase === 'locating') { locating(results); return; }
       if (phase !== 'tracking') return;
+      const th = threshold();
       for (let r = from; r < results.length; r++) {
         const res = results[r];
         const spoken = wordsOf(res);
         let i = used[r] ?? 0;
         while (i < spoken.length && pos < flat.length && phase === 'tracking') {
-          let m = matchAt(spoken, i, flat, pos, threshold());
+          // 1. going back over words already written
+          if (back !== null) {
+            const mb = matchAt(spoken, i, flat, back, th);
+            if (mb.n) {
+              for (let k = 0; k < mb.e; k++) markReplay(back + k);
+              back += mb.e; i += mb.n; used[r] = i;
+              say('Going back over it…', 'good');
+              if (back >= pos) endReplay();
+              continue;
+            }
+          }
+          // 2. the next word
+          let m = matchAt(spoken, i, flat, pos, th);
           // When following, the Bismillah is optional: if the reader goes straight into ayah 1, skip it.
           if (!m.n && mode === 'follow' && flat[pos].item.a === 0 && flat[pos].wi === 0) {
             const bItem = flat[pos].item;
             const after = pos + bItem.words.length;
-            if (flat[after] && matchAt(spoken, i, flat, after, threshold()).n) {
+            if (flat[after] && matchAt(spoken, i, flat, after, th).n) {
               bItem.words.forEach((x) => { x.state = 'skipped'; if (x.el) x.el.className = 'w out'; });
               pos = after;
-              m = matchAt(spoken, i, flat, pos, threshold());
+              m = matchAt(spoken, i, flat, pos, th);
             }
           }
           if (m.n) {
+            if (back !== null) endReplay();
             i += m.n; used[r] = i; accept(m.e, false); continue;
           }
-          if (!res.isFinal) break;   // interim text may still change; judge it once it is final
+          // 3. starting to go back 1 to 3 words
+          const bt = findBacktrack(spoken, i, th);
+          if (bt !== null) {
+            back = bt;
+            const mb = matchAt(spoken, i, flat, back, th);
+            for (let k = 0; k < mb.e; k++) markReplay(back + k);
+            back += mb.e; i += mb.n; used[r] = i;
+            say('Going back over it…', 'good');
+            if (back >= pos) endReplay();
+            continue;
+          }
+          // 4. an extra word from the speech engine, followed by the right word: ignore it
+          if (spoken[i + 1] && matchAt(spoken, i + 1, flat, pos, th).n) { i++; used[r] = i; continue; }
+          // 5. interim text may still change; judge it once it is final
+          if (!res.isFinal) break;
           i++; used[r] = i;
-          if (reject(spoken[i - 1])) return;
+          reject(spoken[i - 1]);
         }
       }
     }
